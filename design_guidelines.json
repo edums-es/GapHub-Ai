@@ -1,0 +1,127 @@
+{
+  "theme": "dark",
+  "archetype": "Archetype 4 (Swiss & High-Contrast) blended with Archetype 7 (Electric & Neon)",
+  "emotional_tone": "Futuristic, high-tech, precise, authoritative, and energetic.",
+  "colors": {
+    "background": {
+      "default": "#0A0A0A",
+      "surface_1": "#1A1A1A",
+      "surface_2": "#2A2A2A",
+      "canvas": "#050505"
+    },
+    "primary": {
+      "default": "#F97316",
+      "hover": "#EA580C",
+      "glow": "rgba(249, 115, 22, 0.4)"
+    },
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "#A3A3A3",
+      "muted": "#737373"
+    },
+    "border": {
+      "default": "#27272A",
+      "focus": "#F97316",
+      "subtle": "#18181B"
+    },
+    "status": {
+      "success": "#10B981",
+      "warning": "#F59E0B",
+      "error": "#EF4444",
+      "info": "#3B82F6"
+    }
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Outfit, sans-serif",
+      "body": "IBM Plex Sans, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "scales": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl font-black tracking-tighter text-white",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl font-bold tracking-tight text-white",
+      "h3": "text-xl sm:text-2xl font-semibold tracking-tight text-white",
+      "h4": "text-lg font-medium text-white",
+      "body": "text-base leading-relaxed text-[#A3A3A3]",
+      "small": "text-sm text-[#737373]",
+      "overline": "text-xs font-bold uppercase tracking-[0.2em] text-[#F97316]"
+    }
+  },
+  "spacing_and_layout": {
+    "philosophy": "Generous spacing for marketing sections, dense 'Control Room' grid for dashboards and flow builders.",
+    "container": "max-w-7xl mx-auto px-6 lg:px-8",
+    "dashboard_grid": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6",
+    "canvas_builder": "w-full h-[calc(100vh-64px)] overflow-hidden bg-[#050505] relative",
+    "radii": {
+      "cards": "rounded-lg",
+      "buttons": "rounded-md",
+      "inputs": "rounded-md",
+      "nodes": "rounded-lg"
+    }
+  },
+  "surfaces_and_materials": {
+    "header": "backdrop-blur-xl bg-[#0A0A0A]/80 border-b border-[#27272A] z-50 sticky top-0",
+    "sidebar": "bg-[#0A0A0A] border-r border-[#27272A]",
+    "cards": "bg-[#1A1A1A] border border-[#27272A] hover:border-[#F97316]/50 transition-colors duration-200",
+    "canvas_background": "bg-[radial-gradient(#27272A_1px,transparent_1px)] [background-size:24px_24px] bg-[#050505]",
+    "builder_nodes": "bg-[#1A1A1A] border border-[#27272A] shadow-xl",
+    "builder_nodes_active": "border-[#F97316] shadow-[0_0_15px_rgba(249,115,22,0.3)] ring-1 ring-[#F97316]"
+  },
+  "motion_and_interaction": {
+    "hover_states": "Buttons and links must explicitly shift background or text color. Cards elevate slightly (-translate-y-1) or trigger border glow.",
+    "transitions": "transition-all duration-200 ease-out",
+    "focus_rings": "focus:outline-none focus:ring-2 focus:ring-[#F97316] focus:ring-offset-2 focus:ring-offset-[#0A0A0A]"
+  },
+  "component_instructions": {
+    "buttons": {
+      "primary": "bg-[#F97316] text-white hover:bg-[#EA580C] shadow-[0_0_10px_rgba(249,115,22,0.2)] hover:shadow-[0_0_20px_rgba(249,115,22,0.4)]",
+      "secondary": "bg-[#1A1A1A] text-white border border-[#27272A] hover:bg-[#2A2A2A]",
+      "ghost": "text-[#A3A3A3] hover:text-white hover:bg-[#1A1A1A]"
+    },
+    "flow_builder": {
+      "strategy": "Use purely custom HTML/CSS/SVG for the canvas. Use absolute positioning for nodes. Draw SVG cubic bezier curves `<path d=\"M... C...\" />` for edges connecting nodes. Do not use ReactFlow or third-party libraries.",
+      "node_anatomy": "Header with icon and title, body with form inputs (Shadcn customized), handles (small circles) on left/right for inputs/outputs."
+    },
+    "marketplace": {
+      "strategy": "Grid of MCP plugins. Use 'Tracing Beam' or subtle neon borders on hover. Badges for LLM provider (OpenAI, Anthropic, Gemini)."
+    },
+    "data_attributes": "Add data-testid to all interactive elements."
+  },
+  "media": {
+    "icons": {
+      "library": "lucide-react",
+      "instruction": "Default choice for SaaS. Use crisp outlines, set stroke-width to 1.5 or 2 based on density."
+    },
+    "image_urls": {
+      "hero_background": {
+        "url": "https://images.unsplash.com/photo-1698847036555-3fbd00ec6946?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Njl8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGRhcmslMjBiYWNrZ3JvdW5kJTIwb3JhbmdlJTIwYWNjZW50cyUyMHRlY2h8ZW58MHx8fHwxNzc1NzUwNjA5fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Abstract black and orange squares/tech grid background. Use heavily overlaid with black to make it barely visible.",
+        "category": "landing_page_hero"
+      },
+      "secondary_background": {
+        "url": "https://images.unsplash.com/photo-1694407997361-0232f7ce5a38?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Njl8MHwxfHNlYXJjaHwzfHxhYnN0cmFjdCUyMGRhcmslMjBiYWNrZ3JvdW5kJTIwb3JhbmdlJTIwYWNjZW50cyUyMHRlY2h8ZW58MHx8fHwxNzc1NzUwNjA5fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Wavy lines dark orange abstract. Good for login/register page background split.",
+        "category": "auth_background"
+      },
+      "user_avatars": [
+        {
+          "url": "https://images.unsplash.com/photo-1627890458144-4c0c481bf4b8?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzd8MHwxfHNlYXJjaHwyfHxwcm9mZXNzaW9uYWwlMjB1c2VyJTIwYXZhdGFyJTIwcG9ydHJhaXQlMjBkYXJrJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3NzU3NTA1OTd8MA&ixlib=rb-4.1.0&q=85",
+          "description": "User avatar 1",
+          "category": "avatar"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1764546373114-2d7a87221733?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzd8MHwxfHNlYXJjaHwxfHxwcm9mZXNzaW9uYWwlMjB1c2VyJTIwYXZhdGFyJTIwcG9ydHJhaXQlMjBkYXJrJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3NzU3NTA1OTd8MA&ixlib=rb-4.1.0&q=85",
+          "description": "User avatar 2",
+          "category": "avatar"
+        }
+      ]
+    }
+  },
+  "instructions_to_main_agent": [
+    "Initialize Tailwind with strictly dark mode capabilities. Configure colors extending the primary orange and deep black neutral palette.",
+    "Implement the Layout with a fixed, dark sidebar for navigation and a top header that contains workspace switcher and user profile.",
+    "The Flow Builder must be built from scratch. Create a container with position:relative, mapping over an array of nodes rendering absolute div components. Use an SVG overlay spanning the entire container width/height to draw connecting lines between node coordinates.",
+    "Use Shadcn UI components but override their default borders, radii (make them slightly sharper), and hover states to match the aggressive tech aesthetic.",
+    "Do NOT implement light mode toggles. Remove any theme switchers. Force dark mode context."
+  ]
+}
