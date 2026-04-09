@@ -350,12 +350,45 @@ async def execute_agent(agent: dict, user_input: str, workspace_creds: dict):
     provider = llm_config.get("provider", "openai")
     model = llm_config.get("model", "gpt-4o-mini")
     api_key = llm_config.get("api_key") or os.environ.get("EMERGENT_LLM_KEY")
-    system_prompt = llm_config.get("system_prompt", "Você é um assistente inteligente de CRM. Responda sempre em português.")
+    user_system_prompt = llm_config.get("system_prompt", "Você é um assistente inteligente de CRM. Responda sempre em português.")
     temperature = float(llm_config.get("temperature", 0.7))
     max_tokens = int(llm_config.get("max_tokens", 4096))
 
     if not api_key:
         raise ValueError("API Key do LLM não configurada. Configure no nó LLM do agente.")
+
+    # Mandatory CRM behavior rules appended to every agent
+    MANDATORY_CRM_RULES = """
+
+---
+REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
+
+1. DIREÇÃO DAS MENSAGENS:
+   - "fromMe": false → Mensagem RECEBIDA DO LEAD (o cliente escreveu).
+   - "fromMe": true  → Mensagem ENVIADA PELA EMPRESA (nós enviamos).
+   NUNCA trate uma mensagem com fromMe:true como se fosse do lead.
+   Ao analisar conversas, identifique SEMPRE quem falou cada coisa antes de agir.
+
+2. QUANDO ENVIAR MENSAGEM AO LEAD:
+   - USE "enviar_mensagem_direta" ou "enviar_mensagem" SOMENTE quando o usuário pedir EXPLICITAMENTE:
+     "responda ao lead", "envie uma mensagem", "contate o cliente", "mande para o número X".
+   - Em NENHUMA outra situação envie mensagem ao lead por conta própria.
+
+3. QUANDO USAR NOTA INTERNA (enviar_nota_interna):
+   - Para TODA análise, qualificação, classificação, resumo, observação ou alerta de uso interno.
+   - A nota interna NÃO aparece para o lead — é visível apenas para a equipe.
+   - Exemplos: "Qualificação: Lead quente", "Análise: Dúvida sobre plano X", "Status: aguardando retorno".
+
+4. TRANSFERÊNCIA PARA HUMANO:
+   - Use "devolver_para_fila" para devolver ticket a um atendente humano.
+   - Avise ao usuário quando transferir.
+
+5. ANÁLISE DE TICKETS:
+   - Ao analisar tickets, primeiro chame "buscar_mensagens_ticket" para ver a conversa completa.
+   - Leia o campo "direcao" de cada mensagem para entender quem falou o quê.
+---"""
+
+    system_prompt = user_system_prompt + MANDATORY_CRM_RULES
 
     nodes = [n for n in agent.get("nodes", []) if n.get("type") == "tool"]
     tool_defs = build_tool_definitions(nodes)

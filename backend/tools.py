@@ -11,13 +11,20 @@ _session_cache: Dict[str, str] = {}
 
 async def get_clickmassa_token(credentials: dict) -> str:
     workspace_id = credentials.get("workspace_id", "default")
+
+    # Se token direto estiver configurado, usa primeiro (mais estável)
+    direct_token = credentials.get("token", "").strip()
+    if direct_token:
+        return direct_token
+
+    # Usa cache de sessão se disponível
     if workspace_id in _session_cache:
         return _session_cache[workspace_id]
 
+    # Tenta login com email+senha
     base_url = credentials.get("base_url", "").rstrip("/")
     email = credentials.get("email")
     password = credentials.get("password")
-    token = credentials.get("token")
 
     if email and password:
         try:
@@ -27,104 +34,184 @@ async def get_clickmassa_token(credentials: dict) -> str:
                 if data.get("token"):
                     _session_cache[workspace_id] = data["token"]
                     return data["token"]
+                logger.error(f"ClickMassa login sem token: {data}")
         except Exception as e:
             logger.error(f"ClickMassa login error: {e}")
 
-    if token:
-        return token
-    raise ValueError("Credenciais ClickMassa inválidas ou não configuradas")
+    raise ValueError(
+        "Credenciais ClickMassa inválidas ou não configuradas. "
+        "Configure email+senha OU token direto nas Configurações."
+    )
+
+
+def _format_messages_with_direction(messages_raw: list) -> list:
+    """Format message list with clear direction labels."""
+    formatted = []
+    for msg in messages_raw:
+        if msg.get("messageType") == "notification":
+            continue  # pula notificações de sistema
+        from_me = msg.get("fromMe", False)
+        formatted.append({
+            "id": msg.get("id"),
+            "direcao": "ENVIADO_PELA_EMPRESA" if from_me else "RECEBIDO_DO_LEAD",
+            "fromMe": from_me,
+            "texto": msg.get("body", ""),
+            "isNotaInterna": msg.get("isPrivate", False),
+            "horario": msg.get("createdAt", msg.get("timestamp", "")),
+        })
+    return formatted
+
+
+def _annotate_ticket_last_message(ticket: dict) -> dict:
+    """Add direction label to last message in a ticket."""
+    last_msg = ticket.get("lastMessage")
+    if last_msg and isinstance(last_msg, dict):
+        from_me = last_msg.get("fromMe", False)
+        ticket["lastMessage"]["direcao"] = "ENVIADO_PELA_EMPRESA" if from_me else "RECEBIDO_DO_LEAD"
+    return ticket
 
 
 async def execute_clickmassa_tool(tool_name: str, params: dict, credentials: dict) -> dict:
     base_url = credentials.get("base_url", "").rstrip("/")
     canal_id = credentials.get("canal_id", params.get("canal_id", ""))
-    token = await get_clickmassa_token(credentials)
+    workspace_id = credentials.get("workspace_id", "default")
+
+    try:
+        token = await get_clickmassa_token(credentials)
+    except ValueError as e:
+        return {"error": str(e)}
+
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    async with httpx.AsyncClient(timeout=20) as c:
-        try:
+    async def do_request():
+        async with httpx.AsyncClient(timeout=20) as c:
             if tool_name == "buscar_contato_por_numero":
-                r = await c.get(f"{base_url}/v1/contacts/number/{params['numero']}", headers=headers)
+                return await c.get(f"{base_url}/v1/contacts/number/{params['numero']}", headers=headers)
             elif tool_name == "buscar_contato_por_id":
-                r = await c.get(f"{base_url}/v1/contacts/{params['id']}", headers=headers)
+                return await c.get(f"{base_url}/v1/contacts/{params['id']}", headers=headers)
             elif tool_name == "listar_contatos":
-                r = await c.get(f"{base_url}/v1/contacts/", headers=headers)
+                return await c.get(f"{base_url}/v1/contacts/", headers=headers)
             elif tool_name == "criar_contato":
                 body = {"name": params["nome"], "number": params["numero"]}
                 if params.get("email"):
                     body["email"] = params["email"]
                 if params.get("tags"):
                     body["tags"] = params["tags"]
-                r = await c.post(f"{base_url}/v1/contacts/", json=body, headers=headers)
+                return await c.post(f"{base_url}/v1/contacts/", json=body, headers=headers)
             elif tool_name == "atualizar_contato":
                 body = {"id": int(params["id"])}
                 for k in ["nome", "email", "leadStatusId", "leadOriginId", "tags"]:
                     if params.get(k):
                         key = "name" if k == "nome" else k
                         body[key] = params[k]
-                r = await c.put(f"{base_url}/contacts/{params['id']}", json=body, headers=headers)
+                return await c.put(f"{base_url}/contacts/{params['id']}", json=body, headers=headers)
             elif tool_name == "adicionar_etiquetas":
-                r = await c.patch(f"{base_url}/v1/contacts/{params['id']}", json={"tags": params["tags"]}, headers=headers)
+                return await c.patch(f"{base_url}/v1/contacts/{params['id']}", json={"tags": params["tags"]}, headers=headers)
             elif tool_name == "enviar_mensagem":
                 cid = params.get("canal_id") or canal_id
                 body = {"number": params["numero"], "body": params["mensagem"], "externalKey": f"mcp-{__import__('time').time()}"}
-                r = await c.post(f"{base_url}/v1/api/external/{cid}", json=body, headers=headers)
+                return await c.post(f"{base_url}/v1/api/external/{cid}", json=body, headers=headers)
             elif tool_name == "enviar_mensagem_direta":
                 search = await c.get(f"{base_url}/tickets?searchParam={params['numero']}&showAll=true", headers=headers)
                 tickets = search.json().get("tickets", [])
                 ticket = next((t for t in tickets if t["contact"]["number"] == params["numero"] and t["status"] in ["open", "pending"]), None)
                 if not ticket:
                     return {"error": f"Nenhum ticket aberto para {params['numero']}"}
-                r = await c.post(f"{base_url}/messages/{ticket['id']}", json={"body": params["mensagem"]}, headers=headers)
+                return await c.post(f"{base_url}/messages/{ticket['id']}", json={"body": params["mensagem"]}, headers=headers)
             elif tool_name == "enviar_nota_interna":
                 search = await c.get(f"{base_url}/tickets?searchParam={params['numero']}&showAll=true", headers=headers)
                 tickets = search.json().get("tickets", [])
                 ticket = next((t for t in tickets if t["contact"]["number"] == params["numero"]), None)
                 if not ticket:
+                    # Try by ticket_id directly
+                    ticket_id = params.get("ticket_id")
+                    if ticket_id:
+                        return await c.post(f"{base_url}/messages/{ticket_id}", json={"body": params["nota"], "isPrivate": True}, headers=headers)
                     return {"error": f"Ticket não encontrado para {params['numero']}"}
-                r = await c.post(f"{base_url}/messages/{ticket['id']}", json={"body": params["nota"], "isPrivate": True}, headers=headers)
+                return await c.post(f"{base_url}/messages/{ticket['id']}", json={"body": params["nota"], "isPrivate": True}, headers=headers)
+            elif tool_name == "buscar_mensagens_ticket":
+                ticket_id = params.get("ticket_id")
+                page = params.get("pagina", 1)
+                r = await c.get(f"{base_url}/messages?ticketId={ticket_id}&pageNumber={page}", headers=headers)
+                data = r.json()
+                messages_raw = data.get("messages", data if isinstance(data, list) else [])
+                formatted = _format_messages_with_direction(messages_raw)
+                return {
+                    "mensagens": formatted,
+                    "total": len(formatted),
+                    "instrucao": "fromMe:false=LEAD falou, fromMe:true=EMPRESA falou. NUNCA trate ENVIADO_PELA_EMPRESA como mensagem do lead.",
+                }
             elif tool_name == "listar_tickets_pendentes":
-                r = await c.get(f"{base_url}/tickets?status=pending&showAll=true", headers=headers)
+                return await c.get(f"{base_url}/tickets?status=pending&showAll=true", headers=headers)
             elif tool_name == "listar_tickets_abertos":
                 qs = f"&searchParam={params['busca']}" if params.get("busca") else ""
-                r = await c.get(f"{base_url}/tickets?status=open&showAll=true{qs}", headers=headers)
+                return await c.get(f"{base_url}/tickets?status=open&showAll=true{qs}", headers=headers)
             elif tool_name == "fechar_ticket":
-                r = await c.put(f"{base_url}/tickets/{params['ticket_id']}", json={"status": "closed"}, headers=headers)
+                return await c.put(f"{base_url}/tickets/{params['ticket_id']}", json={"status": "closed"}, headers=headers)
             elif tool_name == "devolver_para_fila":
-                r = await c.put(f"{base_url}/tickets/{params['ticket_id']}", json={"status": "pending", "userId": None}, headers=headers)
+                return await c.put(f"{base_url}/tickets/{params['ticket_id']}", json={"status": "pending", "userId": None}, headers=headers)
             elif tool_name == "listar_status_lead":
-                r = await c.get(f"{base_url}/lead/status/list", headers=headers)
+                return await c.get(f"{base_url}/lead/status/list", headers=headers)
             elif tool_name == "listar_origens_lead":
-                r = await c.get(f"{base_url}/lead/origin/list", headers=headers)
+                return await c.get(f"{base_url}/lead/origin/list", headers=headers)
             elif tool_name == "criar_tarefa":
-                r = await c.post(f"{base_url}/tasks", json=params, headers=headers)
+                return await c.post(f"{base_url}/tasks", json=params, headers=headers)
             elif tool_name == "listar_tarefas":
-                r = await c.get(f"{base_url}/tasks", headers=headers)
+                return await c.get(f"{base_url}/tasks", headers=headers)
             elif tool_name == "listar_conexoes_whatsapp":
-                r = await c.get(f"{base_url}/whatsapp/list", headers=headers)
+                return await c.get(f"{base_url}/whatsapp/list", headers=headers)
             elif tool_name == "listar_fluxos_chat":
-                r = await c.get(f"{base_url}/chat-flow/list", headers=headers)
+                return await c.get(f"{base_url}/chat-flow/list", headers=headers)
             elif tool_name == "atribuir_fluxo_chat":
-                ticket_id = params.get("ticket_id")
-                fluxo_id = params.get("fluxo_id")
-                r = await c.put(f"{base_url}/tickets/{ticket_id}", json={"chatFlowId": fluxo_id}, headers=headers)
+                return await c.put(f"{base_url}/tickets/{params['ticket_id']}", json={"chatFlowId": params['fluxo_id']}, headers=headers)
             elif tool_name == "listar_funis":
-                r = await c.get(f"{base_url}/funnels", headers=headers)
+                return await c.get(f"{base_url}/funnels", headers=headers)
             elif tool_name == "criar_funil":
-                r = await c.post(f"{base_url}/funnels", json=params, headers=headers)
+                return await c.post(f"{base_url}/funnels", json=params, headers=headers)
             elif tool_name == "atribuir_funil_contato":
-                r = await c.post(f"{base_url}/funnels/assign", json=params, headers=headers)
+                return await c.post(f"{base_url}/funnels/assign", json=params, headers=headers)
             else:
-                return {"error": f"Tool '{tool_name}' não implementada"}
+                return None  # não é um objeto httpx.Response
 
-            try:
-                return r.json()
-            except Exception:
-                return {"raw": r.text, "status": r.status_code}
+    try:
+        result = await do_request()
 
-        except Exception as e:
-            logger.error(f"Tool execution error {tool_name}: {e}")
-            return {"error": str(e)}
+        # Se retornou dict diretamente (não é Response)
+        if isinstance(result, dict):
+            return result
+
+        # Verifica token expirado
+        if result.status_code == 401:
+            # Limpa cache de sessão e tenta com token direto na próxima chamada
+            _session_cache.pop(workspace_id, None)
+            return {
+                "error": "Token inválido ou expirado (401). Sessão limpa. "
+                         "Verifique se o Token ou email+senha nas Configurações estão corretos.",
+                "http_status": 401,
+            }
+
+        try:
+            data = result.json()
+        except Exception:
+            data = {"raw": result.text, "status": result.status_code}
+
+        # Post-process ticket lists to add message direction labels
+        if tool_name in ("listar_tickets_pendentes", "listar_tickets_abertos"):
+            tickets = data.get("tickets", data if isinstance(data, list) else [])
+            if isinstance(tickets, list):
+                for ticket in tickets:
+                    _annotate_ticket_last_message(ticket)
+            data["instrucao_direcao"] = (
+                "IMPORTANTE: lastMessage.direcao='RECEBIDO_DO_LEAD' significa que o LEAD mandou a mensagem. "
+                "'ENVIADO_PELA_EMPRESA' significa que a EMPRESA enviou. "
+                "Use buscar_mensagens_ticket para ver a conversa completa."
+            )
+
+        return data
+
+    except Exception as e:
+        logger.error(f"Tool execution error {tool_name}: {e}")
+        return {"error": str(e)}
 
 
 async def execute_web_search(params: dict) -> dict:
@@ -186,13 +273,28 @@ def _make_tool_def(mcp_id: str, name: str, description: str) -> dict:
         "criar_contato": {"nome": {"type": "string"}, "numero": {"type": "string"}, "email": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}},
         "atualizar_contato": {"id": {"type": "string"}, "nome": {"type": "string"}, "email": {"type": "string"}, "leadStatusId": {"type": "number"}, "leadOriginId": {"type": "number"}},
         "adicionar_etiquetas": {"id": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}},
-        "enviar_mensagem": {"numero": {"type": "string"}, "mensagem": {"type": "string"}, "canal_id": {"type": "string"}},
-        "enviar_mensagem_direta": {"numero": {"type": "string"}, "mensagem": {"type": "string"}},
-        "enviar_nota_interna": {"numero": {"type": "string"}, "nota": {"type": "string"}},
+        "enviar_mensagem": {
+            "numero": {"type": "string", "description": "Número do destinatário"},
+            "mensagem": {"type": "string", "description": "Texto da mensagem a enviar ao LEAD — use SOMENTE quando explicitamente pedido para contatar o lead"},
+            "canal_id": {"type": "string"},
+        },
+        "enviar_mensagem_direta": {
+            "numero": {"type": "string"},
+            "mensagem": {"type": "string", "description": "Texto a enviar ao lead — SOMENTE quando pedido explicitamente para responder ou contatar o lead"},
+        },
+        "enviar_nota_interna": {
+            "numero": {"type": "string", "description": "Número do contato para buscar o ticket"},
+            "nota": {"type": "string", "description": "Texto da nota interna — NÃO aparece para o lead. Use para análises, qualificações e observações"},
+            "ticket_id": {"type": "string", "description": "ID direto do ticket (alternativo ao número)"},
+        },
+        "buscar_mensagens_ticket": {
+            "ticket_id": {"type": "string", "description": "ID do ticket para buscar conversa completa com direção de mensagens"},
+            "pagina": {"type": "number", "description": "Número da página (padrão: 1)"},
+        },
         "listar_tickets_pendentes": {},
         "listar_tickets_abertos": {"busca": {"type": "string"}},
         "fechar_ticket": {"ticket_id": {"type": "string"}},
-        "devolver_para_fila": {"ticket_id": {"type": "string"}},
+        "devolver_para_fila": {"ticket_id": {"type": "string", "description": "ID do ticket para devolver a um atendente humano"}},
         "listar_status_lead": {},
         "listar_origens_lead": {},
         "criar_tarefa": {"tipo": {"type": "string", "enum": ["T", "L", "C"]}, "titulo": {"type": "string"}, "contato_id": {"type": "string"}, "data": {"type": "string"}},
