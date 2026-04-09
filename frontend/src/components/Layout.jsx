@@ -3,13 +3,14 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   LayoutDashboard, Bot, Store, Play, Settings, LogOut,
-  ChevronLeft, ChevronRight, Zap, User, Menu, X
+  ChevronLeft, ChevronRight, Zap, User, Menu, X, Calendar, Shield
 } from "lucide-react";
 
 const NAV_ITEMS = [
   { path: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { path: "/agents", label: "Meus Agentes", icon: Bot },
   { path: "/marketplace", label: "Marketplace", icon: Store },
+  { path: "/schedules", label: "Agendamentos", icon: Calendar },
   { path: "/runs", label: "Execuções", icon: Play },
   { path: "/settings", label: "Configurações", icon: Settings },
 ];
@@ -69,6 +70,33 @@ export default function Layout({ children }) {
             </Link>
           );
         })}
+        {/* Admin link — only for super_admin */}
+        {user?.role === "super_admin" && (() => {
+          const active = location.pathname === "/admin";
+          return (
+            <Link
+              to="/admin"
+              data-testid="nav-admin"
+              onClick={() => setMobileOpen(false)}
+              style={{
+                display: "flex", alignItems: "center", gap: 10,
+                padding: "10px 12px",
+                borderRadius: 8,
+                textDecoration: "none",
+                transition: "all 0.2s ease",
+                background: active ? "rgba(249, 115, 22, 0.15)" : "transparent",
+                border: active ? "1px solid rgba(249, 115, 22, 0.3)" : "1px solid transparent",
+                color: active ? "#F97316" : "#A3A3A3",
+                marginTop: 4,
+              }}
+              onMouseEnter={e => { if (!active) { e.currentTarget.style.background = "#1A1A1A"; e.currentTarget.style.color = "white"; }}}
+              onMouseLeave={e => { if (!active) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "#A3A3A3"; }}}
+            >
+              <Shield size={18} style={{ flexShrink: 0 }} />
+              {!collapsed && <span style={{ fontFamily: "IBM Plex Sans, sans-serif", fontSize: 14, fontWeight: 500 }}>Admin Panel</span>}
+            </Link>
+          );
+        })()}
       </nav>
 
       {/* User */}

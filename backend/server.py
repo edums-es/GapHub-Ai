@@ -14,6 +14,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from auth import auth_router, seed_admin
 from agents import agents_router
 from marketplace import marketplace_router
+from admin import admin_router
+from scheduler import scheduler_router, init_scheduler, stop_scheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -31,8 +33,10 @@ async def lifespan(app: FastAPI):
     app.state.db = db
     await create_indexes(db)
     await seed_admin(db)
+    await init_scheduler(db)
     logger.info("GapHub AI backend started")
     yield
+    stop_scheduler()
     mongo_client.close()
 
 
@@ -43,6 +47,8 @@ async def create_indexes(db):
     await db.agents.create_index([("workspace_id", 1), ("created_at", -1)])
     await db.credentials.create_index([("workspace_id", 1), ("mcp_id", 1)])
     await db.runs.create_index([("agent_id", 1), ("started_at", -1)])
+    await db.schedules.create_index([("workspace_id", 1), ("created_at", -1)])
+    await db.schedules.create_index("active")
 
 
 app = FastAPI(title="GapHub AI", version="1.0.0", lifespan=lifespan)
@@ -58,6 +64,8 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(agents_router)
 app.include_router(marketplace_router)
+app.include_router(admin_router)
+app.include_router(scheduler_router)
 
 
 @app.get("/api/health")

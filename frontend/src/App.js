@@ -12,6 +12,8 @@ import Marketplace from "@/pages/Marketplace";
 import MyAgents from "@/pages/MyAgents";
 import RunHistory from "@/pages/RunHistory";
 import Settings from "@/pages/Settings";
+import AdminPanel from "@/pages/AdminPanel";
+import Schedules from "@/pages/Schedules";
 
 const API = process.env.REACT_APP_BACKEND_URL + "/api";
 
@@ -64,6 +66,23 @@ function ProtectedRoute({ children }) {
   return children;
 }
 
+function AdminRoute({ children }) {
+  const { user, loading } = useAuth();
+  const location = useLocation();
+
+  if (loading) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", background: "#0A0A0A" }}>
+        <div style={{ width: 40, height: 40, border: "3px solid #F97316", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+      </div>
+    );
+  }
+
+  if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
+  if (user.role !== "super_admin") return <Navigate to="/dashboard" replace />;
+  return children;
+}
+
 function AppRouter() {
   const location = useLocation();
 
@@ -84,6 +103,8 @@ function AppRouter() {
       <Route path="/marketplace" element={<ProtectedRoute><Marketplace /></ProtectedRoute>} />
       <Route path="/runs" element={<ProtectedRoute><RunHistory /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
+      <Route path="/schedules" element={<ProtectedRoute><Schedules /></ProtectedRoute>} />
+      <Route path="/admin" element={<AdminRoute><AdminPanel /></AdminRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

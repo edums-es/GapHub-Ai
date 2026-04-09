@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Save, Play, Plus, Trash2, ArrowLeft, Settings, X, ChevronDown, SendHorizontal, Bot, Zap, Database, Globe, Search } from "lucide-react";
+import { Save, Play, Plus, Trash2, ArrowLeft, Settings, X, ChevronDown, SendHorizontal, Bot, Zap, Database, Globe, Search, Layers } from "lucide-react";
 import axios from "axios";
 import Layout from "@/components/Layout";
 
@@ -28,6 +28,80 @@ const AVAILABLE_MCPS = [
   { id: "http_request", label: "HTTP Request", color: "#8B5CF6", icon: Globe, tools: ["http_get","http_post"] },
 ];
 
+const AGENT_TEMPLATES = [
+  {
+    id: "respondedor_leads",
+    name: "Respondedor de Leads",
+    description: "Responde automaticamente a novos leads recebidos no CRM, verifica duplicatas e envia boas-vindas personalizadas.",
+    emoji: "\uD83D\uDC65",
+    category: "CRM",
+    nodes: [
+      { node_id: "trigger_1",        type: "trigger", position: { x: 140, y: 240 }, config: { label: "Novo Lead" } },
+      { node_id: "llm_core",         type: "llm",     position: { x: 420, y: 240 }, config: { label: "Agente de Leads" } },
+      { node_id: "output_1",         type: "output",  position: { x: 700, y: 240 }, config: { label: "Resultado" } },
+      { node_id: "tool_clickmassa_1",type: "tool",    position: { x: 420, y: 390 }, config: { mcp_id: "clickmassa", tool_name: "*", label: "ClickMassa CRM" } },
+    ],
+    edges: [
+      { id: "e1", source: "trigger_1",        target: "llm_core" },
+      { id: "e2", source: "llm_core",         target: "output_1" },
+      { id: "e3", source: "tool_clickmassa_1", target: "llm_core" },
+    ],
+    llm_config: {
+      provider: "openai", model: "gpt-4o-mini", api_key: "",
+      system_prompt: "Voc\u00ea \u00e9 um especialista em atendimento de leads. Ao receber informa\u00e7\u00f5es sobre um novo lead: 1) Verifique se j\u00e1 existe no CRM pelo n\u00famero ou e-mail, 2) Se n\u00e3o existir, crie o contato, 3) Envie uma mensagem de boas-vindas personalizada e profissional. Responda sempre em portugu\u00eas brasileiro.",
+      temperature: 0.7, max_tokens: 4096,
+    },
+  },
+  {
+    id: "gestor_tickets",
+    name: "Gestor de Tickets Pendentes",
+    description: "Lista e prioriza tickets pendentes no CRM, gerando um relat\u00f3rio de a\u00e7\u00f5es recomendadas.",
+    emoji: "\uD83C\uDFAB",
+    category: "Suporte",
+    nodes: [
+      { node_id: "trigger_1",        type: "trigger", position: { x: 140, y: 240 }, config: { label: "Iniciar Gest\u00e3o" } },
+      { node_id: "llm_core",         type: "llm",     position: { x: 420, y: 240 }, config: { label: "Gestor de Suporte" } },
+      { node_id: "output_1",         type: "output",  position: { x: 700, y: 240 }, config: { label: "Relat\u00f3rio" } },
+      { node_id: "tool_clickmassa_1",type: "tool",    position: { x: 420, y: 390 }, config: { mcp_id: "clickmassa", tool_name: "listar_tickets_pendentes", label: "Tickets Pendentes" } },
+    ],
+    edges: [
+      { id: "e1", source: "trigger_1",        target: "llm_core" },
+      { id: "e2", source: "llm_core",         target: "output_1" },
+      { id: "e3", source: "tool_clickmassa_1", target: "llm_core" },
+    ],
+    llm_config: {
+      provider: "openai", model: "gpt-4o-mini", api_key: "",
+      system_prompt: "Voc\u00ea \u00e9 um gestor de suporte ao cliente. Quando acionado: 1) Liste todos os tickets pendentes, 2) Priorize por urg\u00eancia (data de cria\u00e7\u00e3o e tipo), 3) Sugira as pr\u00f3ximas a\u00e7\u00f5es para cada ticket, 4) Feche tickets resolvidos se solicitado. Seja conciso e objetivo. Responda em portugu\u00eas brasileiro.",
+      temperature: 0.3, max_tokens: 4096,
+    },
+  },
+  {
+    id: "followup_automatico",
+    name: "Follow-up Autom\u00e1tico",
+    description: "Realiza follow-up autom\u00e1tico com clientes que n\u00e3o responderam, enviando mensagens personalizadas.",
+    emoji: "\uD83D\uDCE9",
+    category: "Vendas",
+    nodes: [
+      { node_id: "trigger_1",        type: "trigger", position: { x: 140, y: 240 }, config: { label: "Iniciar Follow-up" } },
+      { node_id: "llm_core",         type: "llm",     position: { x: 420, y: 240 }, config: { label: "Agente de Vendas" } },
+      { node_id: "output_1",         type: "output",  position: { x: 700, y: 240 }, config: { label: "Relat\u00f3rio" } },
+      { node_id: "tool_clickmassa_1",type: "tool",    position: { x: 300, y: 390 }, config: { mcp_id: "clickmassa", tool_name: "*", label: "ClickMassa CRM" } },
+      { node_id: "tool_web_1",       type: "tool",    position: { x: 540, y: 390 }, config: { mcp_id: "web_search", tool_name: "buscar_web", label: "Busca na Web" } },
+    ],
+    edges: [
+      { id: "e1", source: "trigger_1",        target: "llm_core" },
+      { id: "e2", source: "llm_core",         target: "output_1" },
+      { id: "e3", source: "tool_clickmassa_1", target: "llm_core" },
+      { id: "e4", source: "tool_web_1",        target: "llm_core" },
+    ],
+    llm_config: {
+      provider: "openai", model: "gpt-4o-mini", api_key: "",
+      system_prompt: "Voc\u00ea \u00e9 um especialista em vendas respons\u00e1vel por follow-up. Quando acionado: 1) Busque contatos que precisam de acompanhamento, 2) Crie mensagens personalizadas para cada contato, 3) Envie as mensagens via CRM. Seja persuasivo mas n\u00e3o invasivo. Responda em portugu\u00eas brasileiro.",
+      temperature: 0.8, max_tokens: 4096,
+    },
+  },
+];
+
 function NodeComponent({ node, selected, onSelect, onDragStart, onDelete }) {
   const colors = NODE_COLORS[node.type] || NODE_COLORS.tool;
   const Icon = node.type === "llm" ? Bot : node.type === "trigger" ? Zap : node.type === "tool" ? Database : Play;
@@ -35,6 +109,7 @@ function NodeComponent({ node, selected, onSelect, onDragStart, onDelete }) {
     <div
       data-testid={`node-${node.node_id}`}
       onMouseDown={(e) => { e.stopPropagation(); onDragStart(e, node.node_id); onSelect(node); }}
+      onClick={(e) => e.stopPropagation()}
       style={{
         position: "absolute",
         left: node.position.x - NODE_WIDTH / 2,
@@ -115,6 +190,49 @@ function EdgeSVG({ nodes, edges }) {
   );
 }
 
+function TemplatesModal({ onApply, onClose }) {
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 250, padding: 20 }}
+      onClick={onClose}
+    >
+      <div
+        style={{ background: "#1A1A1A", border: "1px solid #27272A", borderRadius: 16, width: "100%", maxWidth: 680, maxHeight: "80vh", display: "flex", flexDirection: "column", animation: "fadeIn 0.2s ease-out" }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div style={{ padding: "18px 22px", borderBottom: "1px solid #27272A", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <h3 style={{ fontFamily: "Outfit, sans-serif", fontSize: 18, fontWeight: 700, color: "white", margin: 0 }}>Templates de Agentes</h3>
+            <p style={{ fontSize: 12, color: "#737373", margin: "4px 0 0" }}>Comece mais r\u00e1pido com um template pr\u00e9-configurado</p>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#737373", cursor: "pointer" }}><X size={18} /></button>
+        </div>
+        <div style={{ padding: 20, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 14, overflow: "auto" }}>
+          {AGENT_TEMPLATES.map(tpl => (
+            <div
+              key={tpl.id}
+              onClick={() => onApply(tpl)}
+              style={{ background: "#2A2A2A", border: "1px solid #27272A", borderRadius: 12, padding: 16, cursor: "pointer", transition: "all 0.2s", display: "flex", flexDirection: "column", gap: 8 }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = "#F97316"; e.currentTarget.style.background = "#333"; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = "#27272A"; e.currentTarget.style.background = "#2A2A2A"; }}
+            >
+              <div style={{ fontSize: 28 }}>{tpl.emoji}</div>
+              <div>
+                <div style={{ fontFamily: "Outfit, sans-serif", fontWeight: 700, color: "white", fontSize: 14, marginBottom: 4 }}>{tpl.name}</div>
+                <div style={{ fontSize: 11, color: "#A3A3A3", lineHeight: 1.5 }}>{tpl.description}</div>
+              </div>
+              <div style={{ marginTop: "auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 10, color: "#F97316", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em" }}>{tpl.category}</span>
+                <span style={{ fontSize: 10, color: "#737373" }}>{tpl.nodes.length} n\u00f3s</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ConfigPanel({ node, agent, onUpdate, onClose }) {
   const [config, setConfig] = useState({ ...node.config });
   const [llm, setLlm] = useState({ ...agent.llm_config });
@@ -129,7 +247,7 @@ function ConfigPanel({ node, agent, onUpdate, onClose }) {
     <div style={{ width: 300, background: "#1A1A1A", borderLeft: "1px solid #27272A", display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <div style={{ padding: "16px 18px", borderBottom: "1px solid #27272A", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: "white", fontFamily: "Outfit, sans-serif" }}>
-          {NODE_COLORS[node.type]?.label || "Nó"}: {node.config?.label}
+          {NODE_COLORS[node.type]?.label || "N\u00f3"}: {node.config?.label}
         </div>
         <button onClick={onClose} style={{ background: "none", border: "none", color: "#737373", cursor: "pointer" }}><X size={16} /></button>
       </div>
@@ -177,7 +295,7 @@ function ConfigPanel({ node, agent, onUpdate, onClose }) {
               <input
                 data-testid="llm-api-key"
                 type="password"
-                placeholder="sk-... (deixe vazio para usar chave padrão)"
+                placeholder="sk-... (deixe vazio para usar chave padr\u00e3o)"
                 value={llm.api_key || ""}
                 onChange={e => setLlm(l => ({ ...l, api_key: e.target.value }))}
                 style={{ width: "100%", padding: "8px 10px", background: "#2A2A2A", border: "1px solid #27272A", borderRadius: 7, color: "white", fontSize: 13, fontFamily: "IBM Plex Sans, sans-serif", outline: "none", boxSizing: "border-box" }}
@@ -192,7 +310,7 @@ function ConfigPanel({ node, agent, onUpdate, onClose }) {
                 value={llm.system_prompt || ""}
                 onChange={e => setLlm(l => ({ ...l, system_prompt: e.target.value }))}
                 rows={4}
-                placeholder="Você é um assistente especialista em CRM..."
+                placeholder="Voc\u00ea \u00e9 um assistente especialista em CRM..."
                 style={{ width: "100%", padding: "8px 10px", background: "#2A2A2A", border: "1px solid #27272A", borderRadius: 7, color: "white", fontSize: 12, fontFamily: "IBM Plex Sans, sans-serif", outline: "none", resize: "vertical", boxSizing: "border-box", lineHeight: 1.5 }}
                 onFocus={e => e.target.style.borderColor = "#F97316"}
                 onBlur={e => e.target.style.borderColor = "#27272A"}
@@ -227,7 +345,7 @@ function ConfigPanel({ node, agent, onUpdate, onClose }) {
               </select>
             </div>
             <div>
-              <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#A3A3A3", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.1em" }}>Tool específica (ou todas)</label>
+              <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#A3A3A3", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.1em" }}>Tool espec\u00edfica (ou todas)</label>
               <select
                 data-testid="tool-name-select"
                 value={config.tool_name || "*"}
@@ -270,7 +388,7 @@ function RunModal({ agent, onClose }) {
       const { data } = await axios.post(`${API}/agents/${agent.agent_id}/run`, { input }, { withCredentials: true });
       setResult(data);
     } catch (e) {
-      setError(e.response?.data?.detail || "Erro na execução");
+      setError(e.response?.data?.detail || "Erro na execu\u00e7\u00e3o");
     } finally {
       setRunning(false);
     }
@@ -291,12 +409,8 @@ function RunModal({ agent, onClose }) {
           {result && (
             <div style={{ marginBottom: 16 }}>
               <div style={{ background: "#2A2A2A", borderRadius: 10, padding: 16, marginBottom: 10 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#A3A3A3", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>
-                  Resultado
-                </div>
-                <div style={{ fontSize: 14, color: "white", lineHeight: 1.6, fontFamily: "IBM Plex Sans, sans-serif", whiteSpace: "pre-wrap" }}>
-                  {result.output}
-                </div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#A3A3A3", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>Resultado</div>
+                <div style={{ fontSize: 14, color: "white", lineHeight: 1.6, fontFamily: "IBM Plex Sans, sans-serif", whiteSpace: "pre-wrap" }}>{result.output}</div>
               </div>
               {result.steps?.length > 0 && (
                 <div style={{ background: "rgba(249,115,22,0.05)", border: "1px solid rgba(249,115,22,0.15)", borderRadius: 8, padding: 12 }}>
@@ -360,13 +474,14 @@ export default function AgentBuilder() {
   const [agentName, setAgentName] = useState("Meu Agente");
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
-  const [llmConfig, setLlmConfig] = useState({ provider: "openai", model: "gpt-4o-mini", api_key: "", system_prompt: "Você é um assistente especialista em CRM. Responda sempre em português brasileiro.", temperature: 0.7, max_tokens: 4096 });
+  const [llmConfig, setLlmConfig] = useState({ provider: "openai", model: "gpt-4o-mini", api_key: "", system_prompt: "Voc\u00ea \u00e9 um assistente especialista em CRM. Responda sempre em portugu\u00eas brasileiro.", temperature: 0.7, max_tokens: 4096 });
   const [selectedNode, setSelectedNode] = useState(null);
   const [draggingId, setDraggingId] = useState(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [showRunModal, setShowRunModal] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
   const [loading, setLoading] = useState(!isNew);
 
   useEffect(() => {
@@ -419,6 +534,15 @@ export default function AgentBuilder() {
   }, [draggingId, dragOffset]);
 
   const handleMouseUp = useCallback(() => setDraggingId(null), []);
+
+  const applyTemplate = useCallback((template) => {
+    setNodes(template.nodes);
+    setEdges(template.edges);
+    setLlmConfig(template.llm_config);
+    setAgentName(template.name);
+    setSelectedNode(null);
+    setShowTemplates(false);
+  }, []);
 
   const addToolNode = (mcp) => {
     const nodeId = `tool_${mcp.id}_${Date.now()}`;
@@ -539,6 +663,19 @@ export default function AgentBuilder() {
               })}
             </div>
 
+            {/* Templates button */}
+            <div style={{ padding: "8px 8px 0", borderTop: "1px solid #27272A", marginTop: 6 }}>
+              <button
+                onClick={() => setShowTemplates(true)}
+                style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", background: "rgba(249,115,22,0.08)", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 8, cursor: "pointer", color: "#F97316", fontSize: 12, fontFamily: "IBM Plex Sans, sans-serif", transition: "all 0.2s" }}
+                onMouseEnter={e => { e.currentTarget.style.background = "rgba(249,115,22,0.15)"; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "rgba(249,115,22,0.08)"; }}
+              >
+                <Layers size={13} />
+                <span style={{ fontWeight: 600 }}>Templates</span>
+              </button>
+            </div>
+
             <div style={{ padding: "10px 14px", borderTop: "1px solid #27272A", marginTop: "auto" }}>
               <div style={{ fontSize: 10, color: "#737373", lineHeight: 1.5 }}>
                 Clique para adicionar.<br />Arraste para mover.
@@ -570,8 +707,8 @@ export default function AgentBuilder() {
 
             {/* Hint */}
             {nodes.length <= 3 && (
-              <div style={{ position: "absolute", bottom: 16, left: "50%", transform: "translateX(-50%)", background: "rgba(249,115,22,0.1)", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 8, padding: "6px 14px", fontSize: 12, color: "#F97316", pointerEvents: "none" }}>
-                Adicione ferramentas na barra esquerda e clique nos nós para configurar
+              <div style={{ position: "absolute", bottom: 16, left: "50%", transform: "translateX(-50%)", background: "rgba(249,115,22,0.1)", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 8, padding: "6px 14px", fontSize: 12, color: "#F97316", pointerEvents: "none", whiteSpace: "nowrap" }}>
+                Adicione ferramentas na barra esquerda e clique nos n\u00f3s para configurar
               </div>
             )}
           </div>
@@ -591,8 +728,13 @@ export default function AgentBuilder() {
       {showRunModal && agent && (
         <RunModal agent={agent} onClose={() => setShowRunModal(false)} />
       )}
+
+      {showTemplates && (
+        <TemplatesModal
+          onApply={applyTemplate}
+          onClose={() => setShowTemplates(false)}
+        />
+      )}
     </Layout>
   );
 }
-
-// Play imported from lucide-react above
