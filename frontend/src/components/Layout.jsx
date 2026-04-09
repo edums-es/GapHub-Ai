@@ -3,16 +3,17 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   LayoutDashboard, Bot, Store, Play, Settings, LogOut,
-  ChevronLeft, ChevronRight, Zap, User, Menu, X, Calendar, Shield
+  ChevronLeft, ChevronRight, Zap, User, Menu, X, Calendar, Shield, MessageSquare
 } from "lucide-react";
 
 const NAV_ITEMS = [
-  { path: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { path: "/agents", label: "Meus Agentes", icon: Bot },
-  { path: "/marketplace", label: "Marketplace", icon: Store },
-  { path: "/schedules", label: "Agendamentos", icon: Calendar },
-  { path: "/runs", label: "Execuções", icon: Play },
-  { path: "/settings", label: "Configurações", icon: Settings },
+  { path: "/dashboard",  label: "Dashboard",    icon: LayoutDashboard },
+  { path: "/agents",     label: "Meus Agentes", icon: Bot },
+  { path: "/chat",       label: "Chat",         icon: MessageSquare },
+  { path: "/marketplace",label: "Marketplace",  icon: Store },
+  { path: "/schedules",  label: "Agendamentos", icon: Calendar },
+  { path: "/runs",       label: "Execuções",    icon: Play },
+  { path: "/settings",   label: "Configurações",icon: Settings },
 ];
 
 export default function Layout({ children }) {

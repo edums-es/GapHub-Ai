@@ -115,10 +115,18 @@ export default function RunHistory() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    axios.get(`${API}/runs`, { withCredentials: true })
-      .then(r => setRuns(r.data.runs || []))
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    const load = () =>
+      axios.get(`${API}/runs`, { withCredentials: true })
+        .then(r => setRuns(r.data.runs || []))
+        .catch(console.error)
+        .finally(() => setLoading(false));
+
+    load().then(() => {
+      // Auto-cleanup stuck runs (> 10 min in "running")
+      axios.post(`${API}/runs/cleanup-stale`, {}, { withCredentials: true })
+        .then(r => { if (r.data.cleaned > 0) load(); })
+        .catch(() => {});
+    });
   }, []);
 
   const stats = {

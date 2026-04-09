@@ -3,7 +3,7 @@ import uuid
 import json
 import logging
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -174,15 +174,27 @@ async def upsert_credential(request: Request, body: CredentialCreate):
     user = await get_current_user(request)
     db = request.app.state.db
     ws_id = user["workspace_id"]
-    encrypted_data = {k: encrypt(str(v)) if any(s in k.lower() for s in ["password", "key", "token", "secret"]) else v
-                      for k, v in body.data.items()}
+
     existing = await db.credentials.find_one({"workspace_id": ws_id, "mcp_id": body.mcp_id})
+
     if existing:
+        # Merge: preserve existing encrypted values for sensitive fields left blank
+        merged = dict(existing.get("data", {}))  # keep existing encrypted data as base
+        for k, v in body.data.items():
+            is_sensitive = any(s in k.lower() for s in ["password", "key", "token", "secret"])
+            if is_sensitive and not str(v).strip():
+                continue  # keep existing encrypted value
+            merged[k] = encrypt(str(v)) if is_sensitive else v
+
         await db.credentials.update_one(
             {"workspace_id": ws_id, "mcp_id": body.mcp_id},
-            {"$set": {"data": encrypted_data, "updated_at": datetime.now(timezone.utc)}}
+            {"$set": {"data": merged, "updated_at": datetime.now(timezone.utc)}}
         )
     else:
+        encrypted_data = {
+            k: encrypt(str(v)) if any(s in k.lower() for s in ["password", "key", "token", "secret"]) else v
+            for k, v in body.data.items()
+        }
         await db.credentials.insert_one({
             "cred_id": f"cred_{uuid.uuid4().hex[:12]}",
             "workspace_id": ws_id,
@@ -286,12 +298,21 @@ async def run_agent(request: Request, agent_id: str, body: AgentRunRequest):
     await db.runs.insert_one({**run_doc})
 
     try:
-        output, steps = await execute_agent(agent, body.input, workspace_creds)
+        output, steps = await asyncio.wait_for(
+            execute_agent(agent, body.input, workspace_creds),
+            timeout=90.0
+        )
         await db.runs.update_one(
             {"run_id": run_id},
             {"$set": {"status": "completed", "output": output, "steps": steps, "completed_at": datetime.now(timezone.utc)}}
         )
         return {"run_id": run_id, "status": "completed", "output": output, "steps": steps}
+    except asyncio.TimeoutError:
+        await db.runs.update_one(
+            {"run_id": run_id},
+            {"$set": {"status": "failed", "error": "Tempo limite de 90s excedido. Tente um comando mais específico.", "completed_at": datetime.now(timezone.utc)}}
+        )
+        raise HTTPException(status_code=408, detail="Tempo limite excedido. Tente um comando mais específico ou verifique as credenciais configuradas.")
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Agent run error {run_id}: {error_msg}")
@@ -300,6 +321,27 @@ async def run_agent(request: Request, agent_id: str, body: AgentRunRequest):
             {"$set": {"status": "failed", "error": error_msg, "completed_at": datetime.now(timezone.utc)}}
         )
         raise HTTPException(status_code=500, detail=f"Erro na execução: {error_msg}")
+
+
+@agents_router.post("/runs/cleanup-stale")
+async def cleanup_stale_runs(request: Request):
+    """Mark runs stuck in 'running' for > 10 min as failed."""
+    user = await get_current_user(request)
+    db = request.app.state.db
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
+    result = await db.runs.update_many(
+        {
+            "workspace_id": user["workspace_id"],
+            "status": "running",
+            "started_at": {"$lt": stale_cutoff},
+        },
+        {"$set": {
+            "status": "failed",
+            "error": "Execução interrompida (timeout de conexão)",
+            "completed_at": datetime.now(timezone.utc),
+        }}
+    )
+    return {"cleaned": result.modified_count}
 
 
 async def execute_agent(agent: dict, user_input: str, workspace_creds: dict):

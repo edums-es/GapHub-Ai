@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import axios from "axios";
 import Layout from "@/components/Layout";
-import { Calendar, Plus, Trash2, ToggleLeft, ToggleRight, RefreshCw, X, Save, Bot, Clock, CheckCircle, AlertCircle, Info, Edit2 } from "lucide-react";
+import { Calendar, Plus, Trash2, ToggleLeft, ToggleRight, RefreshCw, X, Save, Bot, Clock, CheckCircle, AlertCircle, Info, Edit2, Zap, FileText, Users } from "lucide-react";
 
 const API = process.env.REACT_APP_BACKEND_URL + "/api";
 
@@ -304,6 +304,57 @@ export default function Schedules() {
         {successMsg && (
           <div style={{ background: "rgba(16,185,129,0.1)", border: "1px solid rgba(16,185,129,0.3)", borderRadius: 8, padding: "10px 14px", marginBottom: 16, color: "#10B981", fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
             <CheckCircle size={14} /> {successMsg}
+          </div>
+        )}
+
+        {/* What is this? — shown while no schedules exist */}
+        {schedules.length === 0 && (
+          <div style={{ background: "#1A1A1A", border: "1px solid #27272A", borderRadius: 12, padding: 28, marginBottom: 20 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+              <div style={{ width: 36, height: 36, background: "rgba(249,115,22,0.12)", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Zap size={18} color="#F97316" />
+              </div>
+              <div>
+                <div style={{ fontFamily: "Outfit, sans-serif", fontSize: 15, fontWeight: 700, color: "white" }}>O que são Agendamentos?</div>
+                <div style={{ fontSize: 12, color: "#737373" }}>Automação sem precisar clicar em nada</div>
+              </div>
+            </div>
+            <p style={{ fontSize: 13, color: "#A3A3A3", lineHeight: 1.7, margin: "0 0 20px" }}>
+              Com agendamentos, seus agentes rodam <strong style={{ color: "white" }}>automaticamente em horários definidos</strong> — sem que você precise enviar um comando manualmente. É como contratar um assistente que trabalha 24h.
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
+              {[
+                {
+                  icon: FileText, color: "#3B82F6",
+                  title: "Relatório Diário",
+                  desc: "Todo dia às 9h, o agente lista os tickets pendentes e gera um resumo automático",
+                  cron: "0 9 * * *",
+                },
+                {
+                  icon: Users, color: "#10B981",
+                  title: "Follow-up de Leads",
+                  desc: "Dias úteis às 8h, verifica contatos sem resposta e envia mensagens de acompanhamento",
+                  cron: "0 8 * * 1-5",
+                },
+                {
+                  icon: Zap, color: "#F97316",
+                  title: "Triagem de Leads",
+                  desc: "A cada hora, verifica novos leads no CRM e faz o pré-atendimento automaticamente",
+                  cron: "0 * * * *",
+                },
+              ].map(({ icon: Icon, color, title, desc, cron }) => (
+                <div key={title} style={{ background: "#2A2A2A", border: "1px solid #27272A", borderRadius: 10, padding: 14 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                    <div style={{ width: 28, height: 28, background: `${color}18`, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <Icon size={14} color={color} />
+                    </div>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "white", fontFamily: "Outfit, sans-serif" }}>{title}</span>
+                  </div>
+                  <p style={{ fontSize: 12, color: "#A3A3A3", margin: "0 0 8px", lineHeight: 1.5 }}>{desc}</p>
+                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 11, color: color, background: `${color}10`, padding: "3px 8px", borderRadius: 5, display: "inline-block" }}>{cron}</div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 

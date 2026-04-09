@@ -14,6 +14,7 @@ import RunHistory from "@/pages/RunHistory";
 import Settings from "@/pages/Settings";
 import AdminPanel from "@/pages/AdminPanel";
 import Schedules from "@/pages/Schedules";
+import AgentChat from "@/pages/AgentChat";
 
 const API = process.env.REACT_APP_BACKEND_URL + "/api";
 
@@ -104,6 +105,7 @@ function AppRouter() {
       <Route path="/runs" element={<ProtectedRoute><RunHistory /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
       <Route path="/schedules" element={<ProtectedRoute><Schedules /></ProtectedRoute>} />
+      <Route path="/chat" element={<ProtectedRoute><AgentChat /></ProtectedRoute>} />
       <Route path="/admin" element={<AdminRoute><AdminPanel /></AdminRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
