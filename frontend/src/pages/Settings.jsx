@@ -9,8 +9,9 @@ const API = process.env.REACT_APP_BACKEND_URL + "/api";
 const CRED_FIELDS = {
   clickmassa: [
     { key: "base_url",  label: "URL da instância",    placeholder: "https://enterprise-40api.seudominio.com.br", type: "text" },
-    { key: "email",     label: "Email de login",       placeholder: "admin@seudominio.com.br",                   type: "email" },
-    { key: "password",  label: "Senha",                placeholder: "••••••••",                                  type: "password", sensitive: true },
+    { key: "token",     label: "Token de API",         placeholder: "••••••••",                                  type: "password", sensitive: true },
+    { key: "email",     label: "Email de login (opcional)", placeholder: "admin@seudominio.com.br",            type: "email" },
+    { key: "password",  label: "Senha (opcional)",     placeholder: "••••••••",                                  type: "password", sensitive: true },
     { key: "canal_id",  label: "Canal ID (WhatsApp)",  placeholder: "ID do canal padrão",                        type: "text" },
   ],
 };

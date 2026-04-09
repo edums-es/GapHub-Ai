@@ -142,10 +142,10 @@ async def execute_clickmassa_tool(tool_name: str, params: dict, credentials: dic
                     "instrucao": "fromMe:false=LEAD falou, fromMe:true=EMPRESA falou. NUNCA trate ENVIADO_PELA_EMPRESA como mensagem do lead.",
                 }
             elif tool_name == "listar_tickets_pendentes":
-                return await c.get(f"{base_url}/tickets?status=pending&showAll=true", headers=headers)
+                return await c.get(f"{base_url}/tickets?status=pending", headers=headers)
             elif tool_name == "listar_tickets_abertos":
                 qs = f"&searchParam={params['busca']}" if params.get("busca") else ""
-                return await c.get(f"{base_url}/tickets?status=open&showAll=true{qs}", headers=headers)
+                return await c.get(f"{base_url}/tickets?status=open{qs}", headers=headers)
             elif tool_name == "fechar_ticket":
                 return await c.put(f"{base_url}/tickets/{params['ticket_id']}", json={"status": "closed"}, headers=headers)
             elif tool_name == "devolver_para_fila":
