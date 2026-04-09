@@ -33,7 +33,7 @@ const AGENT_TEMPLATES = [
     id: "respondedor_leads",
     name: "Respondedor de Leads",
     description: "Responde automaticamente a novos leads recebidos no CRM, verifica duplicatas e envia boas-vindas personalizadas.",
-    emoji: "\uD83D\uDC65",
+    emoji: "👥",
     category: "CRM",
     nodes: [
       { node_id: "trigger_1",        type: "trigger", position: { x: 140, y: 240 }, config: { label: "Novo Lead" } },
@@ -48,20 +48,20 @@ const AGENT_TEMPLATES = [
     ],
     llm_config: {
       provider: "openai", model: "gpt-4o-mini", api_key: "",
-      system_prompt: "Voc\u00ea \u00e9 um especialista em atendimento de leads. Ao receber informa\u00e7\u00f5es sobre um novo lead: 1) Verifique se j\u00e1 existe no CRM pelo n\u00famero ou e-mail, 2) Se n\u00e3o existir, crie o contato, 3) Envie uma mensagem de boas-vindas personalizada e profissional. Responda sempre em portugu\u00eas brasileiro.",
+      system_prompt: "Você é um especialista em atendimento de leads. Ao receber informações sobre um novo lead: 1) Verifique se já existe no CRM pelo número ou e-mail, 2) Se não existir, crie o contato, 3) Envie uma mensagem de boas-vindas personalizada e profissional. Responda sempre em português brasileiro.",
       temperature: 0.7, max_tokens: 4096,
     },
   },
   {
     id: "gestor_tickets",
     name: "Gestor de Tickets Pendentes",
-    description: "Lista e prioriza tickets pendentes no CRM, gerando um relat\u00f3rio de a\u00e7\u00f5es recomendadas.",
-    emoji: "\uD83C\uDFAB",
+    description: "Lista e prioriza tickets pendentes no CRM, gerando um relatório de ações recomendadas.",
+    emoji: "🎫",
     category: "Suporte",
     nodes: [
-      { node_id: "trigger_1",        type: "trigger", position: { x: 140, y: 240 }, config: { label: "Iniciar Gest\u00e3o" } },
+      { node_id: "trigger_1",        type: "trigger", position: { x: 140, y: 240 }, config: { label: "Iniciar Gestão" } },
       { node_id: "llm_core",         type: "llm",     position: { x: 420, y: 240 }, config: { label: "Gestor de Suporte" } },
-      { node_id: "output_1",         type: "output",  position: { x: 700, y: 240 }, config: { label: "Relat\u00f3rio" } },
+      { node_id: "output_1",         type: "output",  position: { x: 700, y: 240 }, config: { label: "Relatório" } },
       { node_id: "tool_clickmassa_1",type: "tool",    position: { x: 420, y: 390 }, config: { mcp_id: "clickmassa", tool_name: "listar_tickets_pendentes", label: "Tickets Pendentes" } },
     ],
     edges: [
@@ -71,20 +71,20 @@ const AGENT_TEMPLATES = [
     ],
     llm_config: {
       provider: "openai", model: "gpt-4o-mini", api_key: "",
-      system_prompt: "Voc\u00ea \u00e9 um gestor de suporte ao cliente. Quando acionado: 1) Liste todos os tickets pendentes, 2) Priorize por urg\u00eancia (data de cria\u00e7\u00e3o e tipo), 3) Sugira as pr\u00f3ximas a\u00e7\u00f5es para cada ticket, 4) Feche tickets resolvidos se solicitado. Seja conciso e objetivo. Responda em portugu\u00eas brasileiro.",
+      system_prompt: "Você é um gestor de suporte ao cliente. Quando acionado: 1) Liste todos os tickets pendentes, 2) Priorize por urgência (data de criação e tipo), 3) Sugira as próximas ações para cada ticket, 4) Feche tickets resolvidos se solicitado. Seja conciso e objetivo. Responda em português brasileiro.",
       temperature: 0.3, max_tokens: 4096,
     },
   },
   {
     id: "followup_automatico",
-    name: "Follow-up Autom\u00e1tico",
-    description: "Realiza follow-up autom\u00e1tico com clientes que n\u00e3o responderam, enviando mensagens personalizadas.",
-    emoji: "\uD83D\uDCE9",
+    name: "Follow-up Automático",
+    description: "Realiza follow-up automático com clientes que não responderam, enviando mensagens personalizadas.",
+    emoji: "📩",
     category: "Vendas",
     nodes: [
       { node_id: "trigger_1",        type: "trigger", position: { x: 140, y: 240 }, config: { label: "Iniciar Follow-up" } },
       { node_id: "llm_core",         type: "llm",     position: { x: 420, y: 240 }, config: { label: "Agente de Vendas" } },
-      { node_id: "output_1",         type: "output",  position: { x: 700, y: 240 }, config: { label: "Relat\u00f3rio" } },
+      { node_id: "output_1",         type: "output",  position: { x: 700, y: 240 }, config: { label: "Relatório" } },
       { node_id: "tool_clickmassa_1",type: "tool",    position: { x: 300, y: 390 }, config: { mcp_id: "clickmassa", tool_name: "*", label: "ClickMassa CRM" } },
       { node_id: "tool_web_1",       type: "tool",    position: { x: 540, y: 390 }, config: { mcp_id: "web_search", tool_name: "buscar_web", label: "Busca na Web" } },
     ],
@@ -96,7 +96,7 @@ const AGENT_TEMPLATES = [
     ],
     llm_config: {
       provider: "openai", model: "gpt-4o-mini", api_key: "",
-      system_prompt: "Voc\u00ea \u00e9 um especialista em vendas respons\u00e1vel por follow-up. Quando acionado: 1) Busque contatos que precisam de acompanhamento, 2) Crie mensagens personalizadas para cada contato, 3) Envie as mensagens via CRM. Seja persuasivo mas n\u00e3o invasivo. Responda em portugu\u00eas brasileiro.",
+      system_prompt: "Você é um especialista em vendas responsável por follow-up. Quando acionado: 1) Busque contatos que precisam de acompanhamento, 2) Crie mensagens personalizadas para cada contato, 3) Envie as mensagens via CRM. Seja persuasivo mas não invasivo. Responda em português brasileiro.",
       temperature: 0.8, max_tokens: 4096,
     },
   },
@@ -203,7 +203,7 @@ function TemplatesModal({ onApply, onClose }) {
         <div style={{ padding: "18px 22px", borderBottom: "1px solid #27272A", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
             <h3 style={{ fontFamily: "Outfit, sans-serif", fontSize: 18, fontWeight: 700, color: "white", margin: 0 }}>Templates de Agentes</h3>
-            <p style={{ fontSize: 12, color: "#737373", margin: "4px 0 0" }}>Comece mais r\u00e1pido com um template pr\u00e9-configurado</p>
+            <p style={{ fontSize: 12, color: "#737373", margin: "4px 0 0" }}>Comece mais rápido com um template pré-configurado</p>
           </div>
           <button onClick={onClose} style={{ background: "none", border: "none", color: "#737373", cursor: "pointer" }}><X size={18} /></button>
         </div>
@@ -223,7 +223,7 @@ function TemplatesModal({ onApply, onClose }) {
               </div>
               <div style={{ marginTop: "auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <span style={{ fontSize: 10, color: "#F97316", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em" }}>{tpl.category}</span>
-                <span style={{ fontSize: 10, color: "#737373" }}>{tpl.nodes.length} n\u00f3s</span>
+                <span style={{ fontSize: 10, color: "#737373" }}>{tpl.nodes.length} nós</span>
               </div>
             </div>
           ))}
@@ -247,7 +247,7 @@ function ConfigPanel({ node, agent, onUpdate, onClose }) {
     <div style={{ width: 300, background: "#1A1A1A", borderLeft: "1px solid #27272A", display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <div style={{ padding: "16px 18px", borderBottom: "1px solid #27272A", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: "white", fontFamily: "Outfit, sans-serif" }}>
-          {NODE_COLORS[node.type]?.label || "N\u00f3"}: {node.config?.label}
+          {NODE_COLORS[node.type]?.label || "Nó"}: {node.config?.label}
         </div>
         <button onClick={onClose} style={{ background: "none", border: "none", color: "#737373", cursor: "pointer" }}><X size={16} /></button>
       </div>
@@ -295,7 +295,7 @@ function ConfigPanel({ node, agent, onUpdate, onClose }) {
               <input
                 data-testid="llm-api-key"
                 type="password"
-                placeholder="sk-... (deixe vazio para usar chave padr\u00e3o)"
+                placeholder="sk-... (deixe vazio para usar chave padrão)"
                 value={llm.api_key || ""}
                 onChange={e => setLlm(l => ({ ...l, api_key: e.target.value }))}
                 style={{ width: "100%", padding: "8px 10px", background: "#2A2A2A", border: "1px solid #27272A", borderRadius: 7, color: "white", fontSize: 13, fontFamily: "IBM Plex Sans, sans-serif", outline: "none", boxSizing: "border-box" }}
@@ -310,7 +310,7 @@ function ConfigPanel({ node, agent, onUpdate, onClose }) {
                 value={llm.system_prompt || ""}
                 onChange={e => setLlm(l => ({ ...l, system_prompt: e.target.value }))}
                 rows={4}
-                placeholder="Voc\u00ea \u00e9 um assistente especialista em CRM..."
+                placeholder="Você é um assistente especialista em CRM..."
                 style={{ width: "100%", padding: "8px 10px", background: "#2A2A2A", border: "1px solid #27272A", borderRadius: 7, color: "white", fontSize: 12, fontFamily: "IBM Plex Sans, sans-serif", outline: "none", resize: "vertical", boxSizing: "border-box", lineHeight: 1.5 }}
                 onFocus={e => e.target.style.borderColor = "#F97316"}
                 onBlur={e => e.target.style.borderColor = "#27272A"}
@@ -345,7 +345,7 @@ function ConfigPanel({ node, agent, onUpdate, onClose }) {
               </select>
             </div>
             <div>
-              <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#A3A3A3", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.1em" }}>Tool espec\u00edfica (ou todas)</label>
+              <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#A3A3A3", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.1em" }}>Tool específica (ou todas)</label>
               <select
                 data-testid="tool-name-select"
                 value={config.tool_name || "*"}
@@ -388,7 +388,7 @@ function RunModal({ agent, onClose }) {
       const { data } = await axios.post(`${API}/agents/${agent.agent_id}/run`, { input }, { withCredentials: true });
       setResult(data);
     } catch (e) {
-      setError(e.response?.data?.detail || "Erro na execu\u00e7\u00e3o");
+      setError(e.response?.data?.detail || "Erro na execução");
     } finally {
       setRunning(false);
     }
@@ -409,8 +409,12 @@ function RunModal({ agent, onClose }) {
           {result && (
             <div style={{ marginBottom: 16 }}>
               <div style={{ background: "#2A2A2A", borderRadius: 10, padding: 16, marginBottom: 10 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#A3A3A3", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>Resultado</div>
-                <div style={{ fontSize: 14, color: "white", lineHeight: 1.6, fontFamily: "IBM Plex Sans, sans-serif", whiteSpace: "pre-wrap" }}>{result.output}</div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#A3A3A3", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>
+                  Resultado
+                </div>
+                <div style={{ fontSize: 14, color: "white", lineHeight: 1.6, fontFamily: "IBM Plex Sans, sans-serif", whiteSpace: "pre-wrap" }}>
+                  {result.output}
+                </div>
               </div>
               {result.steps?.length > 0 && (
                 <div style={{ background: "rgba(249,115,22,0.05)", border: "1px solid rgba(249,115,22,0.15)", borderRadius: 8, padding: 12 }}>
@@ -474,7 +478,7 @@ export default function AgentBuilder() {
   const [agentName, setAgentName] = useState("Meu Agente");
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
-  const [llmConfig, setLlmConfig] = useState({ provider: "openai", model: "gpt-4o-mini", api_key: "", system_prompt: "Voc\u00ea \u00e9 um assistente especialista em CRM. Responda sempre em portugu\u00eas brasileiro.", temperature: 0.7, max_tokens: 4096 });
+  const [llmConfig, setLlmConfig] = useState({ provider: "openai", model: "gpt-4o-mini", api_key: "", system_prompt: "Você é um assistente especialista em CRM. Responda sempre em português brasileiro.", temperature: 0.7, max_tokens: 4096 });
   const [selectedNode, setSelectedNode] = useState(null);
   const [draggingId, setDraggingId] = useState(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
@@ -708,7 +712,7 @@ export default function AgentBuilder() {
             {/* Hint */}
             {nodes.length <= 3 && (
               <div style={{ position: "absolute", bottom: 16, left: "50%", transform: "translateX(-50%)", background: "rgba(249,115,22,0.1)", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 8, padding: "6px 14px", fontSize: 12, color: "#F97316", pointerEvents: "none", whiteSpace: "nowrap" }}>
-                Adicione ferramentas na barra esquerda e clique nos n\u00f3s para configurar
+                Adicione ferramentas na barra esquerda e clique nos nós para configurar
               </div>
             )}
           </div>

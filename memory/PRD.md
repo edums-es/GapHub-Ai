@@ -67,5 +67,7 @@ Plataforma web multi-tenant para criar Agentes de IA autônomos que se comunicam
 ## Next Tasks
 1. Implementar N8N Webhook MCP
 2. Adicionar WhatsApp Evolution API como MCP ativo
-3. Criar admin panel para super admin gerenciar tenants
-4. Adicionar scheduler para execuções automáticas
+3. Criar admin panel para super admin gerenciar tenants ✅ CONCLUÍDO
+4. Adicionar scheduler para execuções automáticas ✅ CONCLUÍDO
+5. Agent Templates pré-prontos (Respondedor de Leads, Gestor de Tickets, Follow-up) ✅ CONCLUÍDO
+6. Bug fix node click propagation no AgentBuilder ✅ CONCLUÍDO

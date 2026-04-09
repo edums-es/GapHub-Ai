@@ -41,11 +41,11 @@ function DeleteConfirmModal({ tenant, onConfirm, onClose }) {
           </div>
           <div>
             <div style={{ fontSize: 16, fontWeight: 700, color: "white", fontFamily: "Outfit, sans-serif" }}>Excluir Tenant</div>
-            <div style={{ fontSize: 12, color: "#737373" }}>Esta a\u00e7\u00e3o n\u00e3o pode ser desfeita</div>
+            <div style={{ fontSize: 12, color: "#737373" }}>Esta ação não pode ser desfeita</div>
           </div>
         </div>
         <p style={{ fontSize: 13, color: "#A3A3A3", lineHeight: 1.6, marginBottom: 20 }}>
-          Voc\u00ea est\u00e1 prestes a excluir o workspace <strong style={{ color: "white" }}>{tenant?.name}</strong> e todos os dados do usu\u00e1rio <strong style={{ color: "white" }}>{tenant?.owner?.email}</strong>, incluindo agentes, execu\u00e7\u00f5es e credenciais.
+          Você está prestes a excluir o workspace <strong style={{ color: "white" }}>{tenant?.name}</strong> e todos os dados do usuário <strong style={{ color: "white" }}>{tenant?.owner?.email}</strong>, incluindo agentes, execuções e credenciais.
         </p>
         <div style={{ display: "flex", gap: 10 }}>
           <button
@@ -117,7 +117,7 @@ export default function AdminPanel() {
     try {
       await axios.delete(`${API}/admin/users/${deleteTenant.owner?.user_id}`, { withCredentials: true });
       setTenants(ts => ts.filter(t => t.workspace_id !== deleteTenant.workspace_id));
-      showSuccess("Tenant exclu\u00eddo com sucesso");
+      showSuccess("Tenant excluído com sucesso");
       setDeleteTenant(null);
     } catch (e) {
       setError(e.response?.data?.detail || "Erro ao excluir tenant");
@@ -159,7 +159,7 @@ export default function AdminPanel() {
             </div>
             <div>
               <h1 style={{ fontFamily: "Outfit, sans-serif", fontSize: 22, fontWeight: 800, color: "white", margin: 0 }}>Admin Panel</h1>
-              <p style={{ fontSize: 12, color: "#737373", margin: 0 }}>Ger\u00eancia de todos os tenants da plataforma</p>
+              <p style={{ fontSize: 12, color: "#737373", margin: 0 }}>Gerência de todos os tenants da plataforma</p>
             </div>
           </div>
           <button
@@ -188,10 +188,10 @@ export default function AdminPanel() {
         {/* Stats */}
         {stats && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14, marginBottom: 28 }}>
-            <StatCard icon={Users} label="Usu\u00e1rios" value={stats.total_users} color="#3B82F6" />
+            <StatCard icon={Users} label="Usuários" value={stats.total_users} color="#3B82F6" />
             <StatCard icon={Building2} label="Workspaces" value={stats.total_workspaces} color="#8B5CF6" />
             <StatCard icon={Bot} label="Agentes" value={stats.total_agents} color="#F97316" />
-            <StatCard icon={Play} label="Execu\u00e7\u00f5es" value={stats.total_runs} color="#10B981" />
+            <StatCard icon={Play} label="Execuções" value={stats.total_runs} color="#10B981" />
             <StatCard icon={Crown} label="Taxa de Sucesso" value={`${stats.success_rate}%`} color="#F59E0B" />
             <StatCard icon={Calendar} label="Agendamentos Ativos" value={stats.active_schedules || 0} color="#EC4899" />
           </div>
@@ -238,7 +238,7 @@ export default function AdminPanel() {
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                 <thead>
                   <tr style={{ borderBottom: "1px solid #27272A" }}>
-                    {["Workspace", "Propriet\u00e1rio", "Plano", "Agentes", "Execu\u00e7\u00f5es", "Criado em", "A\u00e7\u00f5es"].map(h => (
+                    {["Workspace", "Proprietário", "Plano", "Agentes", "Execuções", "Criado em", "Ações"].map(h => (
                       <th key={h} style={{ padding: "10px 16px", textAlign: "left", fontFamily: "Outfit, sans-serif", fontWeight: 600, color: "#737373", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", whiteSpace: "nowrap" }}>{h}</th>
                     ))}
                   </tr>

@@ -9,12 +9,12 @@ const CRON_PRESETS = [
   { label: "A cada hora", value: "0 * * * *" },
   { label: "A cada 30 minutos", value: "*/30 * * * *" },
   { label: "A cada 6 horas", value: "0 */6 * * *" },
-  { label: "Todo dia \u00e0s 8h (UTC)", value: "0 8 * * *" },
-  { label: "Todo dia \u00e0s 9h (UTC)", value: "0 9 * * *" },
+  { label: "Todo dia às 8h (UTC)", value: "0 8 * * *" },
+  { label: "Todo dia às 9h (UTC)", value: "0 9 * * *" },
   { label: "Todo dia ao meio-dia (UTC)", value: "0 12 * * *" },
-  { label: "Dias \u00fateis \u00e0s 8h (UTC)", value: "0 8 * * 1-5" },
-  { label: "Dias \u00fateis \u00e0s 9h (UTC)", value: "0 9 * * 1-5" },
-  { label: "Toda segunda-feira \u00e0s 9h (UTC)", value: "0 9 * * 1" },
+  { label: "Dias úteis às 8h (UTC)", value: "0 8 * * 1-5" },
+  { label: "Dias úteis às 9h (UTC)", value: "0 9 * * 1-5" },
+  { label: "Toda segunda-feira às 9h (UTC)", value: "0 9 * * 1" },
   { label: "Personalizado", value: "custom" },
 ];
 
@@ -23,11 +23,11 @@ function describeCron(expr) {
     "0 * * * *": "A cada hora",
     "*/30 * * * *": "A cada 30 min",
     "0 */6 * * *": "A cada 6 horas",
-    "0 8 * * *": "Todo dia \u00e0s 8h",
-    "0 9 * * *": "Todo dia \u00e0s 9h",
+    "0 8 * * *": "Todo dia às 8h",
+    "0 9 * * *": "Todo dia às 9h",
     "0 12 * * *": "Todo dia 12h",
-    "0 8 * * 1-5": "Dias \u00fateis 8h",
-    "0 9 * * 1-5": "Dias \u00fateis 9h",
+    "0 8 * * 1-5": "Dias úteis 8h",
+    "0 9 * * 1-5": "Dias úteis 9h",
     "0 9 * * 1": "Segunda 9h",
   };
   return map[expr] || expr;
@@ -54,9 +54,9 @@ function ScheduleModal({ schedule, agents, onSave, onClose }) {
   };
 
   const handleSubmit = async () => {
-    if (!form.name.trim()) { setError("Nome obrigat\u00f3rio"); return; }
+    if (!form.name.trim()) { setError("Nome obrigatório"); return; }
     if (!form.agent_id) { setError("Selecione um agente"); return; }
-    if (!form.input_message.trim()) { setError("Mensagem de entrada obrigat\u00f3ria"); return; }
+    if (!form.input_message.trim()) { setError("Mensagem de entrada obrigatória"); return; }
     setError("");
     setSaving(true);
     try {
@@ -82,7 +82,7 @@ function ScheduleModal({ schedule, agents, onSave, onClose }) {
         <div style={{ padding: "18px 22px", borderBottom: "1px solid #27272A", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
             <h3 style={{ fontFamily: "Outfit, sans-serif", fontSize: 16, fontWeight: 700, color: "white", margin: 0 }}>{isEdit ? "Editar Agendamento" : "Novo Agendamento"}</h3>
-            <p style={{ fontSize: 12, color: "#737373", margin: "3px 0 0" }}>Configure quando o agente ser\u00e1 executado automaticamente</p>
+            <p style={{ fontSize: 12, color: "#737373", margin: "3px 0 0" }}>Configure quando o agente será executado automaticamente</p>
           </div>
           <button onClick={onClose} style={{ background: "none", border: "none", color: "#737373", cursor: "pointer" }}><X size={18} /></button>
         </div>
@@ -97,7 +97,7 @@ function ScheduleModal({ schedule, agents, onSave, onClose }) {
             <input
               value={form.name}
               onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-              placeholder="Ex: Triagem di\u00e1ria de tickets"
+              placeholder="Ex: Triagem diária de tickets"
               style={inputStyle}
               onFocus={e => e.target.style.borderColor = "#F97316"}
               onBlur={e => e.target.style.borderColor = "#27272A"}
@@ -116,7 +116,7 @@ function ScheduleModal({ schedule, agents, onSave, onClose }) {
           </div>
 
           <div>
-            <label style={labelStyle}>Frequ\u00eancia</label>
+            <label style={labelStyle}>Frequência</label>
             <select
               value={cronMode}
               onChange={e => handlePresetChange(e.target.value)}
@@ -134,11 +134,11 @@ function ScheduleModal({ schedule, agents, onSave, onClose }) {
                   onFocus={e => e.target.style.borderColor = "#F97316"}
                   onBlur={e => e.target.style.borderColor = "#27272A"}
                 />
-                <div style={{ fontSize: 11, color: "#737373", marginTop: 5 }}>Formato: minuto hora dia m\u00eas dia-semana (UTC)</div>
+                <div style={{ fontSize: 11, color: "#737373", marginTop: 5 }}>Formato: minuto hora dia mês dia-semana (UTC)</div>
               </div>
             )}
             <div style={{ fontSize: 11, color: "#A3A3A3", marginTop: 4, display: "flex", alignItems: "center", gap: 4 }}>
-              <Info size={11} /> Todos os hor\u00e1rios s\u00e3o em UTC
+              <Info size={11} /> Todos os horários são em UTC
             </div>
           </div>
 
@@ -148,7 +148,7 @@ function ScheduleModal({ schedule, agents, onSave, onClose }) {
               value={form.input_message}
               onChange={e => setForm(f => ({ ...f, input_message: e.target.value }))}
               rows={3}
-              placeholder="Mensagem enviada ao agente em cada execu\u00e7\u00e3o..."
+              placeholder="Mensagem enviada ao agente em cada execução..."
               style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }}
               onFocus={e => e.target.style.borderColor = "#F97316"}
               onBlur={e => e.target.style.borderColor = "#27272A"}
@@ -177,7 +177,7 @@ function ScheduleModal({ schedule, agents, onSave, onClose }) {
             disabled={saving}
             style={{ width: "100%", padding: "11px", background: "#F97316", color: "white", border: "none", borderRadius: 8, cursor: saving ? "not-allowed" : "pointer", fontFamily: "Outfit, sans-serif", fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}
           >
-            <Save size={15} /> {saving ? "Salvando..." : (isEdit ? "Salvar altera\u00e7\u00f5es" : "Criar agendamento")}
+            <Save size={15} /> {saving ? "Salvando..." : (isEdit ? "Salvar alterações" : "Criar agendamento")}
           </button>
         </div>
       </div>
@@ -240,7 +240,7 @@ export default function Schedules() {
     try {
       await axios.delete(`${API}/schedules/${scheduleId}`, { withCredentials: true });
       setSchedules(s => s.filter(sc => sc.schedule_id !== scheduleId));
-      showSuccess("Agendamento exclu\u00eddo!");
+      showSuccess("Agendamento excluído!");
     } catch (e) {
       setError(e.response?.data?.detail || "Erro ao excluir");
     }
@@ -310,7 +310,7 @@ export default function Schedules() {
         {agents.length === 0 && (
           <div style={{ background: "rgba(249,115,22,0.05)", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 10, padding: 16, marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
             <Info size={16} color="#F97316" />
-            <span style={{ fontSize: 13, color: "#A3A3A3" }}>Voc\u00ea precisa ter pelo menos um agente salvo para criar agendamentos.</span>
+            <span style={{ fontSize: 13, color: "#A3A3A3" }}>Você precisa ter pelo menos um agente salvo para criar agendamentos.</span>
           </div>
         )}
 
@@ -360,7 +360,7 @@ export default function Schedules() {
                         {schedule.last_run_status === "completed"
                           ? <CheckCircle size={11} color="#10B981" />
                           : <AlertCircle size={11} color="#EF4444" />}
-                        \u00daltima: {formatDate(schedule.last_run)}
+                        Última: {formatDate(schedule.last_run)}
                       </div>
                     )}
                   </div>
