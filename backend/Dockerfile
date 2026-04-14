@@ -12,9 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copia código da aplicação
 COPY . .
 
-# CORREÇÃO: Usa printf para garantir newline real no entrypoint script
-# (echo com \n em sh não cria newline real em todos os sistemas)
-RUN printf '#!/bin/sh\npython db/init.py\nuvicorn server:app --host 0.0.0.0 --port ${PORT:-8000}\n' > /entrypoint.sh && chmod +x /entrypoint.sh
+# Inicializa o db primeiro e depois carrega a API (sem $PORT para evitar regex vazio)
+RUN printf '#!/bin/sh\npython db/init.py\nuvicorn server:app --host 0.0.0.0 --port 8000\n' > /entrypoint.sh && chmod +x /entrypoint.sh
 
 EXPOSE 8000
 
