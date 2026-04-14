@@ -1,9 +1,119 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import axios from "axios";
 import Layout from "@/components/Layout";
-import { Bot, Send, ChevronDown, ChevronRight, Wrench, AlertCircle, RefreshCw, MessageSquare, Plus, Sparkles, X, Wifi } from "lucide-react";
+import { Bot, Send, ChevronDown, ChevronRight, Wrench, AlertCircle, RefreshCw, MessageSquare, Plus, Sparkles, Wifi, Copy, Check } from "lucide-react";
 
 const API = process.env.REACT_APP_BACKEND_URL + "/api";
+
+// ── Renderizador de Markdown leve ──────────────────────────────────────────
+function renderInline(text, keyPrefix) {
+  const parts = [];
+  const regex = /(\*\*[^*\n]+\*\*|\*[^*\n]+\*|`[^`\n]+`)/g;
+  let lastIndex = 0;
+  let match;
+  let idx = 0;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(<span key={`${keyPrefix}-t${idx++}`}>{text.slice(lastIndex, match.index)}</span>);
+    }
+    const raw = match[0];
+    if (raw.startsWith("**")) {
+      parts.push(<strong key={`${keyPrefix}-b${idx++}`} style={{ color: "#FFFFFF", fontWeight: 700 }}>{raw.slice(2, -2)}</strong>);
+    } else if (raw.startsWith("*")) {
+      parts.push(<em key={`${keyPrefix}-i${idx++}`} style={{ color: "#D4D4D4" }}>{raw.slice(1, -1)}</em>);
+    } else if (raw.startsWith("`")) {
+      parts.push(<code key={`${keyPrefix}-c${idx++}`} style={{ background: "#2A2A2A", padding: "2px 6px", borderRadius: 4, fontSize: "0.87em", fontFamily: "IBM Plex Mono, monospace", color: "#10B981" }}>{raw.slice(1, -1)}</code>);
+    }
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < text.length) {
+    parts.push(<span key={`${keyPrefix}-t${idx++}`}>{text.slice(lastIndex)}</span>);
+  }
+  return parts.length === 0 ? text : parts;
+}
+
+function MarkdownContent({ content }) {
+  if (!content) return null;
+  const lines = content.split("\n");
+  const result = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    // Heading
+    const headingMatch = line.match(/^(#{1,3}) (.+)/);
+    if (headingMatch) {
+      const lvl = headingMatch[1].length;
+      const szMap = [17, 15, 14]; const fwMap = [800, 700, 600];
+      result.push(
+        <div key={i} style={{ fontSize: szMap[lvl-1], fontWeight: fwMap[lvl-1], color: "#FFFFFF", margin: `${lvl === 1 ? 14 : 10}px 0 ${lvl === 1 ? 6 : 3}px`, fontFamily: "Outfit, sans-serif", lineHeight: 1.3 }}>
+          {renderInline(headingMatch[2], `h${i}`)}
+        </div>
+      );
+      i++; continue;
+    }
+    // Lista não-ordenada
+    if (/^[-*] /.test(line)) {
+      const items = [];
+      while (i < lines.length && /^[-*] /.test(lines[i])) {
+        items.push(<li key={i} style={{ marginBottom: 3, lineHeight: 1.65, color: "#E2E8F0" }}>{renderInline(lines[i].replace(/^[-*] /, ""), `li${i}`)}</li>);
+        i++;
+      }
+      result.push(<ul key={`ul${i}`} style={{ margin: "6px 0", paddingLeft: 20, fontSize: 14 }}>{items}</ul>);
+      continue;
+    }
+    // Lista ordenada
+    if (/^\d+\. /.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\d+\. /.test(lines[i])) {
+        items.push(<li key={i} style={{ marginBottom: 3, lineHeight: 1.65, color: "#E2E8F0" }}>{renderInline(lines[i].replace(/^\d+\. /, ""), `li${i}`)}</li>);
+        i++;
+      }
+      result.push(<ol key={`ol${i}`} style={{ margin: "6px 0", paddingLeft: 20, fontSize: 14 }}>{items}</ol>);
+      continue;
+    }
+    // Separador
+    if (/^---+$/.test(line.trim())) {
+      result.push(<hr key={i} style={{ border: "none", borderTop: "1px solid #2A2A2A", margin: "10px 0" }} />);
+      i++; continue;
+    }
+    // Linha vazia
+    if (line.trim() === "") {
+      if (result.length > 0) result.push(<div key={i} style={{ height: 6 }} />);
+      i++; continue;
+    }
+    // Parágrafo
+    result.push(
+      <p key={i} style={{ margin: "0 0 1px", color: "#E2E8F0", fontSize: 14, lineHeight: 1.75 }}>
+        {renderInline(line, `p${i}`)}
+      </p>
+    );
+    i++;
+  }
+  return <div style={{ fontFamily: "IBM Plex Sans, sans-serif" }}>{result}</div>;
+}
+// ──────────────────────────────────────────────────────────────────────────────
+
+function CopyButton({ text }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    navigator.clipboard?.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    });
+  };
+  return (
+    <button
+      onClick={handleCopy}
+      title="Copiar resposta"
+      style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 10, padding: "3px 8px", background: "transparent", border: "1px solid #2A2A2A", borderRadius: 6, color: copied ? "#10B981" : "#525252", cursor: "pointer", fontSize: 11, fontFamily: "IBM Plex Sans, sans-serif", transition: "all 0.15s" }}
+      onMouseEnter={e => { if (!copied) { e.currentTarget.style.borderColor = "#404040"; e.currentTarget.style.color = "#A3A3A3"; } }}
+      onMouseLeave={e => { if (!copied) { e.currentTarget.style.borderColor = "#2A2A2A"; e.currentTarget.style.color = "#525252"; } }}
+    >
+      {copied ? <Check size={11} /> : <Copy size={11} />}
+      {copied ? "Copiado!" : "Copiar"}
+    </button>
+  );
+}
 
 function ToolCallCard({ step, index }) {
   const [open, setOpen] = useState(false);
@@ -83,17 +193,20 @@ function ChatMessage({ msg }) {
             <p style={{ margin: 0, color: "#F87171", fontSize: 13, lineHeight: 1.5 }}>{msg.error}</p>
           </div>
         ) : (
-          <div style={{ background: "#1A1A1A", border: "1px solid #27272A", borderRadius: "4px 14px 14px 14px", padding: "12px 16px" }}>
-            <p style={{ margin: 0, color: "white", fontSize: 14, lineHeight: 1.7, fontFamily: "IBM Plex Sans, sans-serif", whiteSpace: "pre-wrap" }}>{msg.content}</p>
+          <div style={{ background: "#1A1A1A", border: "1px solid #27272A", borderRadius: "4px 14px 14px 14px", padding: "14px 16px" }}>
+            <MarkdownContent content={msg.content} />
             {msg.steps?.length > 0 && (
-              <div style={{ marginTop: 10 }}>
-                <div style={{ fontSize: 10, color: "#737373", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+              <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #27272A" }}>
+                <div style={{ fontSize: 10, color: "#525252", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
                   {msg.steps.length} ferramenta{msg.steps.length !== 1 ? "s" : ""} utilizada{msg.steps.length !== 1 ? "s" : ""}
                 </div>
                 {msg.steps.map((step, i) => (
                   <ToolCallCard key={i} step={step} index={i} />
                 ))}
               </div>
+            )}
+            {msg.content && (
+              <CopyButton text={msg.content} />
             )}
           </div>
         )}
