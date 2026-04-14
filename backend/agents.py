@@ -789,9 +789,12 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
    Sempre leia todos os prefixos antes de tirar conclusões sobre o que o lead quer.
 
 2. QUANDO ENVIAR MENSAGEM AO LEAD:
-   - USE "enviar_mensagem_direta" ou "enviar_mensagem" SOMENTE quando o usuário pedir EXPLICITAMENTE:
+   - Se o input começar com "[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]", você DEVE
+     obrigatoriamente usar "enviar_mensagem_direta" com o ticket_id indicado para responder ao lead.
+     Gere a resposta e chame a ferramenta — não apenas escreva o texto.
+   - Em outros contextos, use "enviar_mensagem_direta" SOMENTE quando explicitamente pedido:
      "responda ao lead", "envie uma mensagem", "contate o cliente", "mande para o número X".
-   - Em NENHUMA outra situação envie mensagem ao lead por conta própria.
+   - NUNCA envie mensagens por conta própria em outros cenários.
 
 3. QUANDO USAR NOTA INTERNA (enviar_nota_interna):
    - Para TODA análise, qualificação, classificação, resumo, observação ou alerta de uso interno.
@@ -1009,40 +1012,88 @@ async def dashboard_stats(request: Request):
     }
 
 
+
+
 # ── Webhook Trigger ───────────────────────────────────────────────────────────
 # Permite que sistemas externos (CRM, n8n, Zapier, etc.) disparem agentes
 # via HTTP POST sem autenticação JWT — usando um secret por agente.
 #
-# Uso:
-#   POST /api/webhook/{agent_id}
-#   Header: X-Webhook-Secret: <secret>
-#   Body: {"input": "mensagem", "metadata": {...}}
-#
-# O campo webhook_secret é gerado automaticamente ao criar o agente se não
-# fornecido. Pode ser rotacionado via PUT /api/agents/{agent_id}/webhook-secret.
+# Aceita payload nativo do GapHub OU formato nativo do ClickMassa/Chatwoot/Evo.
+# Filtra automaticamente mensagens enviadas pela empresa (fromMe) para evitar loops.
+# Após o agente gerar a resposta, envia automaticamente via enviar_mensagem_direta.
 
-class WebhookPayload(BaseModel):
-    input: str
-    metadata: Optional[dict] = None  # dados extras (ex: número de contato, tag do CRM)
-    session_id: Optional[str] = None
+
+def _parse_crm_payload(payload: dict) -> tuple:
+    """
+    Analisa payloads de webhook do ClickMassa/Chatwoot/Evo.
+    Retorna: (user_input, ticket_id, contact_number, contact_name, from_me, is_private)
+    """
+    user_input = ""
+    ticket_id = ""
+    contact_number = ""
+    contact_name = ""
+    from_me = False
+    is_private = False
+
+    # ── Formato ClickMassa: {ticket: {...}, message: {...}, contact: {...}} ──
+    if "ticket" in payload or "message" in payload:
+        ticket = payload.get("ticket", {})
+        message = payload.get("message", {})
+        contact = payload.get("contact", ticket.get("contact", {}))
+
+        ticket_id = str(ticket.get("id", ""))
+        contact_number = str(contact.get("number", contact.get("phone", "")))
+        contact_name = contact.get("name", "")
+
+        from_me = bool(message.get("fromMe", payload.get("fromMe", False)))
+        is_private = bool(message.get("isPrivate", payload.get("isPrivate", False)))
+        msg_type = message.get("messageType", message.get("type", "chat"))
+
+        if msg_type == "notification":
+            is_private = True  # trata notificações como skip
+
+        user_input = str(message.get("body", payload.get("body", ""))).strip()
+
+    # ── Formato Chatwoot/Evo: {event: ..., data: {content: ..., conversation: {...}}} ──
+    elif "event" in payload and "data" in payload:
+        data = payload.get("data", {})
+        msg_type = data.get("message_type", "incoming")
+        from_me = msg_type != "incoming"
+        is_private = bool(data.get("private", False))
+
+        conversation = data.get("conversation", {})
+        ticket_id = str(conversation.get("id", ""))
+
+        sender = data.get("sender", {})
+        contact_number = sender.get("phone_number", "")
+        contact_name = sender.get("name", "")
+        user_input = str(data.get("content", "")).strip()
+
+    # ── Formato nativo GapHub / genérico ──
+    else:
+        user_input = str(payload.get("input", payload.get("body", payload.get("text", "")))).strip()
+        ticket_id = str(payload.get("ticket_id", payload.get("ticketId", "")))
+        contact_number = str(payload.get("contact_number", payload.get("numero", "")))
+        contact_name = payload.get("contact_name", payload.get("nome", ""))
+        from_me = bool(payload.get("fromMe", False))
+        is_private = bool(payload.get("isPrivate", False))
+
+    return user_input, ticket_id, contact_number, contact_name, from_me, is_private
 
 
 @agents_router.post("/webhook/{agent_id}")
-async def webhook_trigger(
-    request: Request,
-    agent_id: str,
-    body: WebhookPayload,
-    x_webhook_secret: Optional[str] = Header(default=None, alias="X-Webhook-Secret"),
-):
+async def webhook_trigger(request: Request, agent_id: str):
     """
     Endpoint público para disparar agentes via webhook.
-    
-    Autenticação: Header X-Webhook-Secret deve coincidir com o secret do agente.
-    Retorna: run_id para rastreamento assíncrono.
+
+    - Aceita payload nativo do GapHub ({"input": "..."}) ou formato ClickMassa/Chatwoot.
+    - Filtra mensagens fromMe=True para evitar loop infinito.
+    - Após o agente rodar, envia a resposta automaticamente via enviar_mensagem_direta
+      caso o agente não tenha chamado a ferramenta por conta própria.
     """
     db = request.app.state.db
 
-    # Busca agente sem autenticação JWT (endpoint público por design)
+    # 1. Valida agente
     agent = await db.agents.find_one({"agent_id": agent_id})
     if not agent:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
@@ -1050,52 +1101,102 @@ async def webhook_trigger(
     if agent.get("status") != "active":
         raise HTTPException(status_code=403, detail="Agente inativo — ative-o antes de usar webhooks")
 
-    # Verifica secret do webhook
+    # 2. Autenticação flexível (X-Webhook-Secret ou Authorization Bearer)
     stored_secret = agent.get("webhook_secret", "")
-    if not stored_secret:
-        raise HTTPException(
-            status_code=403,
-            detail="Este agente não tem webhook configurado. Acesse Configurações do Agente para gerar um secret."
+    if stored_secret:
+        secret_header = request.headers.get("X-Webhook-Secret", "")
+        auth_header = request.headers.get("Authorization", "")
+        token_provided = secret_header or auth_header.replace("Bearer ", "").strip()
+
+        if not token_provided:
+            raise HTTPException(
+                status_code=401,
+                detail="Header de autenticação obrigatório (X-Webhook-Secret ou Authorization Bearer)"
+            )
+
+        if not hmac.compare_digest(stored_secret, token_provided):
+            raise HTTPException(status_code=401, detail="Webhook secret inválido")
+
+    # 3. Lê e parseia o payload
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Corpo da requisição deve ser JSON válido")
+
+    user_input, ticket_id, contact_number, contact_name, from_me, is_private = _parse_crm_payload(payload)
+
+    # 4. Filtra mensagens que NÃO devem acionar o agente
+    if from_me:
+        logger.info(f"Webhook {agent_id}: mensagem fromMe=True ignorada (evitar loop)")
+        return {"status": "ignored", "reason": "Mensagem enviada pela empresa — ignorada para evitar loop"}
+
+    if is_private:
+        logger.info(f"Webhook {agent_id}: nota interna ou notificação ignorada")
+        return {"status": "ignored", "reason": "Nota interna ou notificação ignorada"}
+
+    if not user_input:
+        logger.info(f"Webhook {agent_id}: payload sem conteúdo de mensagem. Keys: {list(payload.keys())}")
+        return {"status": "ignored", "reason": "Nenhum conteúdo de mensagem encontrado no payload"}
+
+    # 5. Monta input enriquecido com instrução explícita de resposta
+    session_id = (
+        f"webhook_{agent_id}_{ticket_id}"
+        if ticket_id
+        else f"webhook_{agent_id}_{str(uuid.uuid4())[:8]}"
+    )
+
+    if ticket_id:
+        contact_info = f"\nContato: {contact_name} ({contact_number})" if (contact_name or contact_number) else ""
+        enhanced_input = (
+            f"[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]\n"
+            f"Mensagem recebida do lead via CRM:\n"
+            f"\"{user_input}\"\n\n"
+            f"Ticket ID: {ticket_id}"
+            f"{contact_info}\n\n"
+            f"INSTRUÇÃO OBRIGATÓRIA: Use a ferramenta 'enviar_mensagem_direta' com "
+            f"ticket_id={ticket_id} para enviar sua resposta diretamente ao lead no CRM."
         )
+    else:
+        enhanced_input = user_input
 
-    if not x_webhook_secret:
-        raise HTTPException(status_code=401, detail="Header X-Webhook-Secret obrigatório")
-
-    # Comparação segura contra timing attacks
-    if not hmac.compare_digest(stored_secret, x_webhook_secret):
-        raise HTTPException(status_code=401, detail="Webhook secret inválido")
-
-    # Carrega credenciais do workspace
+    # 6. Carrega credenciais do workspace
     workspace_id = agent.get("workspace_id", "")
     workspace_creds = {}
     try:
         cred_docs = await db.credentials.find({"workspace_id": workspace_id}).to_list(50)
         for cred_doc in cred_docs:
-            raw = cred_doc.get("encrypted_data") or cred_doc.get("data", "")
-            if raw:
+            decrypted = {}
+            for k, v in cred_doc.get("data", {}).items():
                 try:
-                    decrypted = fernet.decrypt(raw.encode() if isinstance(raw, str) else raw)
-                    workspace_creds[cred_doc["mcp_id"]] = json.loads(decrypted)
+                    decrypted[k] = decrypt(str(v))
                 except Exception:
-                    workspace_creds[cred_doc["mcp_id"]] = cred_doc.get("data", {})
+                    decrypted[k] = v
+            decrypted["workspace_id"] = workspace_id
+            workspace_creds[cred_doc["mcp_id"]] = decrypted
     except Exception as e:
         logger.warning(f"Webhook: erro ao carregar credenciais do workspace {workspace_id}: {e}")
 
-    # Injeta metadata no input se fornecida
-    user_input = body.input
-    if body.metadata:
-        meta_str = json.dumps(body.metadata, ensure_ascii=False)
-        user_input = f"{body.input}\n\n[Contexto do webhook: {meta_str}]"
+    try:
+        agent_mcp_creds = await _get_agent_mcp_credentials(db, agent_id)
+        if agent_mcp_creds:
+            agent_mcp_creds["workspace_id"] = workspace_id
+            workspace_creds["clickmassa"] = agent_mcp_creds
+    except Exception as e:
+        logger.warning(f"Webhook: erro ao carregar MCP credentials do agente {agent_id}: {e}")
 
-    # Cria registro de run
+    # 7. Cria registro de run
     run_id = str(uuid.uuid4())
-    session_id = body.session_id or f"webhook_{agent_id}_{run_id[:8]}"
     run_doc = {
         "run_id": run_id,
         "agent_id": agent_id,
         "workspace_id": workspace_id,
-        "input": body.input,
-        "metadata": body.metadata or {},
+        "input": user_input,  # input original para exibição no histórico
+        "metadata": {
+            "ticket_id": ticket_id,
+            "contact_number": contact_number,
+            "contact_name": contact_name,
+            "crm_webhook": True,
+        },
         "session_id": session_id,
         "status": "running",
         "source": "webhook",
@@ -1103,21 +1204,48 @@ async def webhook_trigger(
     }
     await db.runs.insert_one(run_doc)
 
-    # Executa agente em background (fire-and-forget)
+    # 8. Executa agente em background (fire-and-forget)
     async def run_background():
         try:
-            result = await execute_agent(agent, user_input, workspace_creds, db=db, session_id=session_id)
+            final_output, steps = await execute_agent(
+                agent, enhanced_input, workspace_creds, db=db, session_id=session_id
+            )
+
+            # Verifica se o agente já enviou via ferramenta
+            sent_via_tool = any(
+                "enviar_mensagem" in s.get("tool", "")
+                for s in steps
+            )
+
+            # Fallback automático: se gerou texto mas não chamou a ferramenta, envia
+            if not sent_via_tool and ticket_id and workspace_creds.get("clickmassa"):
+                try:
+                    creds = workspace_creds["clickmassa"]
+                    send_result = await execute_tool("clickmassa", "enviar_mensagem_direta", {
+                        "ticket_id": str(ticket_id),
+                        "mensagem": final_output,
+                    }, creds)
+                    steps.append({
+                        "tool": "auto_send_fallback",
+                        "params": {"ticket_id": ticket_id},
+                        "result": send_result,
+                        "iteration": 0,
+                    })
+                    logger.info(f"Webhook {agent_id}: resposta enviada automaticamente ao ticket {ticket_id}")
+                except Exception as send_err:
+                    logger.error(f"Webhook {agent_id}: falha ao enviar resposta automática: {send_err}")
+
             await db.runs.update_one(
                 {"run_id": run_id},
                 {"$set": {
                     "status": "completed",
-                    "output": result.get("output", ""),
-                    "steps": result.get("steps", []),
+                    "output": final_output,
+                    "steps": steps,
                     "completed_at": datetime.now(timezone.utc),
                 }}
             )
         except Exception as e:
-            logger.error(f"Webhook run {run_id} falhou: {e}")
+            logger.error(f"Webhook run {run_id} falhou: {e}", exc_info=True)
             await db.runs.update_one(
                 {"run_id": run_id},
                 {"$set": {
@@ -1140,10 +1268,7 @@ async def webhook_trigger(
 
 @agents_router.post("/agents/{agent_id}/webhook-secret")
 async def rotate_webhook_secret(request: Request, agent_id: str):
-    """
-    Gera (ou rotaciona) o webhook secret do agente.
-    Requer autenticação JWT normal.
-    """
+    """Gera (ou rotaciona) o webhook secret do agente. Requer autenticação JWT."""
     user = await get_current_user(request)
     db = request.app.state.db
 
@@ -1167,9 +1292,7 @@ async def rotate_webhook_secret(request: Request, agent_id: str):
 
 @agents_router.get("/agents/{agent_id}/webhook-info")
 async def get_webhook_info(request: Request, agent_id: str):
-    """
-    Retorna informações do webhook do agente (sem expor o secret).
-    """
+    """Retorna informações do webhook do agente (sem expor o secret)."""
     user = await get_current_user(request)
     db = request.app.state.db
 
@@ -1183,5 +1306,8 @@ async def get_webhook_info(request: Request, agent_id: str):
         "has_webhook": has_secret,
         "webhook_url": f"/api/webhook/{agent_id}" if has_secret else None,
         "status": agent.get("status"),
-        "message": "Use POST /api/agents/{agent_id}/webhook-secret para gerar ou rotacionar o secret." if not has_secret else "Webhook ativo.",
+        "message": (
+            "Use POST /api/agents/{agent_id}/webhook-secret para gerar ou rotacionar o secret."
+            if not has_secret else "Webhook ativo."
+        ),
     }
