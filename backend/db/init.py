@@ -81,6 +81,17 @@ async def create_indexes(db):
         name="chat_sessions_ttl_90d"
     )
 
+    # ── webhook_locks — lock atômico por ticket (evita race condition) ────
+    # Lock único por (agent_id + ticket). TTL de 90s garante limpeza automática.
+    await db.webhook_locks.create_index(
+        "lock_key", unique=True, name="webhook_locks_key_unique"
+    )
+    await db.webhook_locks.create_index(
+        "expires_at",
+        expireAfterSeconds=0,  # MongoDB deleta quando expires_at < now
+        name="webhook_locks_ttl"
+    )
+
     # ── webhook_dedup — deduplicação de mensagens (TTL 24h) ───────────────
     await db.webhook_dedup.create_index(
         [("msg_id", pymongo.ASCENDING), ("agent_id", pymongo.ASCENDING)],

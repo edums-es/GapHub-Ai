@@ -761,7 +761,7 @@ async def cleanup_stale_runs(request: Request):
     return {"cleaned": result.modified_count}
 
 
-async def execute_agent(agent: dict, user_input: str, workspace_creds: dict, db=None, session_id: str = None, max_iterations: int = 8):
+async def execute_agent(agent: dict, user_input: str, workspace_creds: dict, db=None, session_id: str = None, max_iterations: int = 8, webhook_mode: bool = False):
     import litellm
     llm_config = agent.get("llm_config", {})
     provider = llm_config.get("provider", "openai")
@@ -815,6 +815,23 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
 
     nodes = [n for n in agent.get("nodes", []) if n.get("type") == "tool"]
     tool_defs = build_tool_definitions(nodes)
+
+    # Em modo webhook o agente só pode ENVIAR — ferramentas de busca são bloqueadas.
+    # Isso evita o loop "busca histórico → vê resposta própria → responde de novo".
+    if webhook_mode:
+        BLOCKED_WEBHOOK_TOOLS = {
+            "buscar_mensagens_ticket", "listar_tickets_pendentes",
+            "buscar_tickets", "get_messages", "list_messages",
+        }
+        before = len(tool_defs)
+        tool_defs = [
+            t for t in tool_defs
+            if t.get("function", {}).get("name", "") not in BLOCKED_WEBHOOK_TOOLS
+        ]
+        logger.info(
+            f"[execute_agent webhook_mode] tools: {before} total → {len(tool_defs)} disponíveis "
+            f"({[t.get('function',{}).get('name') for t in tool_defs]})"
+        )
 
     # ── Carrega histórico da sessão do MongoDB ──────────────────────────────
     history = []
@@ -1215,18 +1232,36 @@ async def webhook_trigger(
             "created_at": datetime.now(timezone.utc)
         })
 
-    # Camada 2: cooldown de 60s por ticket — evita loop mesmo que fromMe não seja detectado
+    # Camada 2: lock atômico por ticket — solução definitiva para race condition.
+    # O cooldown anterior usava find_one + insert separados, deixando uma janela de ~10ms
+    # onde múltiplos webhooks simultâneos passavam ao mesmo tempo.
+    # O upsert com $setOnInsert é atômico no MongoDB: apenas UM webhook insere com sucesso.
+    _lock_acquired = False
     if ticket_id:
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=60)
-        recent = await db.runs.find_one({
-            "agent_id": agent_id,
-            "metadata.ticket_id": ticket_id,
-            "source": "webhook",
-            "started_at": {"$gte": cutoff},
-        })
-        if recent:
-            logger.info(f"[Webhook {agent_id}] ignorado: cooldown 60s para ticket {ticket_id}")
-            return {"status": "ignored", "reason": "Cooldown: ticket respondido há menos de 60s"}
+        lock_key = f"{agent_id}:{ticket_id}"
+        try:
+            now_utc = datetime.now(timezone.utc)
+            lock_result = await db.webhook_locks.update_one(
+                {"lock_key": lock_key},
+                {"$setOnInsert": {
+                    "lock_key": lock_key,
+                    "agent_id": agent_id,
+                    "created_at": now_utc,
+                    "expires_at": now_utc + timedelta(seconds=90),
+                }},
+                upsert=True,
+            )
+            if lock_result.upserted_id:
+                _lock_acquired = True  # fomos nós que criamos o lock
+                logger.info(f"[Webhook {agent_id}] lock adquirido para ticket {ticket_id}")
+            else:
+                # Documento já existia → outro webhook está processando este ticket
+                logger.info(f"[Webhook {agent_id}] lock ativo para ticket {ticket_id} — ignorando webhook duplicado")
+                return {"status": "ignored", "reason": "Ticket já sendo processado por outro webhook (lock ativo)"}
+        except Exception as lock_err:
+            # DuplicateKeyError em corrida extrema → o outro webhook ganhou
+            logger.info(f"[Webhook {agent_id}] conflito de lock para ticket {ticket_id}: {lock_err}")
+            return {"status": "ignored", "reason": "Conflito de lock — ticket já sendo processado"}
     # ───────────────────────────────────────────────────────────────────────────
 
     metadata = {
@@ -1317,7 +1352,12 @@ async def webhook_trigger(
     # Executa agente em background (fire-and-forget)
     async def run_background():
         try:
-            output, steps = await execute_agent(agent, user_input, workspace_creds, db=db, session_id=session_id, max_iterations=3)
+            # webhook_mode=True: remove ferramentas de busca de histórico
+            # Isso impede o loop "busca histórico → vê resposta própria → responde de novo"
+            output, steps = await execute_agent(
+                agent, user_input, workspace_creds, db=db, session_id=session_id,
+                max_iterations=3, webhook_mode=True
+            )
 
             # Fallback automático: se o agente gerou texto mas não chamou enviar_mensagem,
             # envia a resposta programaticamente para garantir que o lead receba
@@ -1373,6 +1413,14 @@ async def webhook_trigger(
                     "completed_at": datetime.now(timezone.utc),
                 }}
             )
+        finally:
+            # Libera o lock atômico para que o próximo webhook deste ticket possa ser processado
+            if _lock_acquired and ticket_id:
+                try:
+                    await db.webhook_locks.delete_one({"lock_key": f"{agent_id}:{ticket_id}"})
+                    logger.info(f"[Webhook {agent_id}] lock liberado para ticket {ticket_id}")
+                except Exception:
+                    pass  # TTL do MongoDB vai limpar em 90s de qualquer forma
 
     asyncio.create_task(run_background())
 
