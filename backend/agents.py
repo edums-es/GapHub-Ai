@@ -761,7 +761,7 @@ async def cleanup_stale_runs(request: Request):
     return {"cleaned": result.modified_count}
 
 
-async def execute_agent(agent: dict, user_input: str, workspace_creds: dict, db=None, session_id: str = None):
+async def execute_agent(agent: dict, user_input: str, workspace_creds: dict, db=None, session_id: str = None, max_iterations: int = 8):
     import litellm
     llm_config = agent.get("llm_config", {})
     provider = llm_config.get("provider", "openai")
@@ -789,12 +789,14 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
    Sempre leia todos os prefixos antes de tirar conclusões sobre o que o lead quer.
 
 2. QUANDO ENVIAR MENSAGEM AO LEAD:
-   - Se o input começar com "[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]", você DEVE
-     obrigatoriamente usar "enviar_mensagem_direta" com o ticket_id indicado para responder ao lead.
-     Gere a resposta e chame a ferramenta — não apenas escreva o texto.
-   - Em outros contextos, use "enviar_mensagem_direta" SOMENTE quando explicitamente pedido:
-     "responda ao lead", "envie uma mensagem", "contate o cliente".
-   - NUNCA envie mensagens por conta própria em outros cenários.
+   - Se o input começar com "[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]":
+     * Use "enviar_mensagem_direta" ou "enviar_mensagem" EXATAMENTE UMA VEZ.
+     * APÓS enviar, PARE COMPLETAMENTE. Não faça mais nenhuma chamada de ferramenta.
+     * NÃO use "buscar_mensagens_ticket" — a mensagem já está no input.
+     * NÃO simule o lead respondendo. NÃO continue a conversa sozinho.
+     * Resposta em UMA mensagem, encerrada.
+   - Em outros contextos, use "enviar_mensagem_direta" SOMENTE quando explicitamente pedido.
+   - NUNCA envie mensagens múltiplas em sequência sem o lead ter respondido entre elas.
 
 3. QUANDO USAR NOTA INTERNA (enviar_nota_interna):
    - Para TODA análise, qualificação, classificação, resumo, observação ou alerta de uso interno.
@@ -837,8 +839,8 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
     ]
 
     steps = []
-    max_iterations = 8
     litellm.set_verbose = False
+    _message_sent = False  # flag: quebra o loop após primeiro envio de mensagem
 
     for iteration in range(max_iterations):
         kwargs = {
@@ -890,6 +892,15 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
                     "content": json.dumps(result, ensure_ascii=False),
                     "tool_call_id": tc.id,
                 })
+
+                # Após enviar mensagem ao lead, encerra o loop para não entrar em loop infinito
+                if "enviar_mensagem" in fn_name:
+                    _message_sent = True
+
+            if _message_sent:
+                # Gera uma resposta final de texto sem chamar mais ferramentas
+                final_output = msg.content or "Mensagem enviada ao lead."
+                break
         else:
             final_output = msg.content or "Execução concluída sem resposta."
 
@@ -1306,7 +1317,7 @@ async def webhook_trigger(
     # Executa agente em background (fire-and-forget)
     async def run_background():
         try:
-            output, steps = await execute_agent(agent, user_input, workspace_creds, db=db, session_id=session_id)
+            output, steps = await execute_agent(agent, user_input, workspace_creds, db=db, session_id=session_id, max_iterations=3)
 
             # Fallback automático: se o agente gerou texto mas não chamou enviar_mensagem,
             # envia a resposta programaticamente para garantir que o lead receba
