@@ -1068,65 +1068,118 @@ async def webhook_trigger(
     if not hmac.compare_digest(stored_secret, token_provided):
         raise HTTPException(status_code=401, detail="Webhook secret inválido")
 
-    # 2. Parseamento de Payload Flexível
+    # 2. Lê e loga o payload bruto para diagnóstico
     try:
         payload = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Corpo da requisição deve ser JSON válido")
 
-    user_input = ""
-    metadata = {}
-    session_id = None
+    # LOG COMPLETO para diagnóstico — visível nos logs do Railway
+    logger.info(f"[Webhook {agent_id}] payload keys={list(payload.keys())}")
+    logger.info(f"[Webhook {agent_id}] payload={json.dumps(payload, ensure_ascii=False)[:800]}")
 
-    # Detecta se é um Webhook Nativo ClickMassa Evo (Event: messages.upsert)
-    if "event" in payload or "messages" in payload or "ticket" in payload:
-        # ClickMassa/Z-API style payload
-        # Exemplos comuns: Eventos de mensagem
-        logger.info(f"Recebido Webhook externo CRM no Agente {agent_id}. Payload keys: {list(payload.keys())}")
-        
-        # Filtro de Loop Infinito: não processa mensagens enviadas por nós mesmos
-        is_from_me = payload.get("fromMe", False) or payload.get("message", {}).get("fromMe", False)
-        if is_from_me:
-            return {"status": "ignored", "message": "Mensagem enviada pela empresa — ignorada para evitar loop"}
+    # 3. Extrai todos os campos tentando múltiplos caminhos (qualquer formato de CRM)
+    # Normaliza: alguns CRMs envolvem tudo em "data"
+    data_wrap = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+    msg_obj   = payload.get("message", data_wrap.get("message", {})) or {}
+    ticket_obj = payload.get("ticket", data_wrap.get("ticket", data_wrap.get("conversation", {}))) or {}
+    contact_obj = (
+        payload.get("contact")
+        or data_wrap.get("contact")
+        or data_wrap.get("sender")
+        or ticket_obj.get("contact")
+        or {}
+    )
 
-        # Filtro: notas internas e notificações não devem acionar o agente
-        is_private = payload.get("isPrivate", False) or payload.get("message", {}).get("isPrivate", False)
-        msg_type = payload.get("messageType") or payload.get("message", {}).get("messageType", "chat")
-        if is_private or msg_type == "notification":
-            return {"status": "ignored", "message": "Nota interna ou notificação ignorada"}
+    # --- from_me ---
+    from_me = bool(
+        payload.get("fromMe")
+        or msg_obj.get("fromMe")
+        or data_wrap.get("fromMe")
+        or (data_wrap.get("message_type") in ("outgoing", 1))
+    )
 
-        # Extrai a mensagem e meta
-        if "body" in payload:
-            user_input = payload["body"]
-        elif "message" in payload and "body" in payload["message"]:
-            user_input = payload["message"]["body"]
-        elif "text" in payload:
-            user_input = payload["text"]
+    # --- is_private / notification ---
+    is_private = bool(
+        payload.get("isPrivate")
+        or msg_obj.get("isPrivate")
+        or data_wrap.get("private")
+    )
+    msg_type = (
+        payload.get("messageType")
+        or msg_obj.get("messageType")
+        or msg_obj.get("type")
+        or data_wrap.get("message_type")
+        or "chat"
+    )
+    if str(msg_type).lower() == "notification":
+        is_private = True
 
-        ticket_id = payload.get("ticketId") or payload.get("ticket", {}).get("id") or ""
-        contact = payload.get("contact", payload.get("ticket", {}).get("contact", {}))
-        contact_id = str(contact.get("id", payload.get("contactId", "")))
-        contact_number = str(contact.get("number", contact.get("phone", "")))
-        contact_name = contact.get("name", "")
+    if from_me:
+        logger.info(f"[Webhook {agent_id}] ignorado: fromMe=True")
+        return {"status": "ignored", "reason": "Mensagem enviada pela empresa — ignorada para evitar loop"}
+    if is_private:
+        logger.info(f"[Webhook {agent_id}] ignorado: nota interna ou notificação")
+        return {"status": "ignored", "reason": "Nota interna ou notificação ignorada"}
 
-        metadata = {
-            "crm_webhook": True,
-            "ticket_id": ticket_id,
-            "contact_id": contact_id,
-            "contact_number": contact_number,
-            "contact_name": contact_name,
-        }
-        if ticket_id:
-            session_id = f"webhook_{agent_id}_{ticket_id}"
-
-    else:
-        # Padrão nativo do GapHub
-        user_input = payload.get("input", "")
-        metadata = payload.get("metadata", {})
-        session_id = payload.get("session_id")
+    # --- user_input ---
+    user_input = (
+        msg_obj.get("body")
+        or payload.get("body")
+        or data_wrap.get("content")
+        or data_wrap.get("body")
+        or payload.get("text")
+        or data_wrap.get("text")
+        or payload.get("input")
+        or ""
+    )
+    if isinstance(user_input, str):
+        user_input = user_input.strip()
 
     if not user_input:
-        return {"status": "ignored", "message": "Nenhum input processável encontrado no payload do webhook."}
+        logger.info(f"[Webhook {agent_id}] ignorado: sem conteúdo de mensagem no payload")
+        return {"status": "ignored", "reason": "Nenhum conteúdo de mensagem encontrado no payload"}
+
+    # --- ticket_id ---
+    raw_ticket_id = (
+        payload.get("ticketId")
+        or ticket_obj.get("id")
+        or data_wrap.get("conversation", {}).get("id") if isinstance(data_wrap.get("conversation"), dict) else None
+        or payload.get("ticket_id")
+        or data_wrap.get("ticket_id")
+    )
+    ticket_id = str(raw_ticket_id) if raw_ticket_id is not None else ""
+    if ticket_id in ("None", "null", "0", ""):
+        ticket_id = ""
+
+    # --- contact info ---
+    contact_number = str(
+        contact_obj.get("number")
+        or contact_obj.get("phone")
+        or contact_obj.get("phone_number")
+        or payload.get("contactNumber")
+        or payload.get("numero")
+        or data_wrap.get("sender", {}).get("phone_number") if isinstance(data_wrap.get("sender"), dict) else None
+        or ""
+    ).strip()
+    contact_name = str(
+        contact_obj.get("name")
+        or payload.get("contactName")
+        or data_wrap.get("sender", {}).get("name") if isinstance(data_wrap.get("sender"), dict) else None
+        or ""
+    ).strip()
+    contact_id = str(contact_obj.get("id") or payload.get("contactId") or "")
+
+    logger.info(f"[Webhook {agent_id}] extraído: input='{user_input[:60]}' ticket_id='{ticket_id}' contact_number='{contact_number}' contact_name='{contact_name}'")
+
+    metadata = {
+        "crm_webhook": True,
+        "ticket_id": ticket_id,
+        "contact_id": contact_id,
+        "contact_number": contact_number,
+        "contact_name": contact_name,
+    }
+    session_id = f"webhook_{agent_id}_{ticket_id}" if ticket_id else None
 
     # Carrega credenciais do workspace
     workspace_id = agent.get("workspace_id", "")
@@ -1156,18 +1209,37 @@ async def webhook_trigger(
     # Monta input enriquecido com instrução explícita (apenas para o agente, não salvo no histórico)
     original_input = user_input  # preserva para exibição limpa no histórico
     ticket_id_for_reply = metadata.get("ticket_id", "")
+    contact_number_for_reply = metadata.get("contact_number", "")
+
+    # Sempre injeta instrução de resposta — usa ticket_id se disponível, senão número
+    contact_info = ""
+    if metadata.get("contact_name") or contact_number_for_reply:
+        contact_info = f"\nContato: {metadata.get('contact_name', '')} ({contact_number_for_reply})"
+
     if ticket_id_for_reply:
-        contact_info = ""
-        if metadata.get("contact_name") or metadata.get("contact_number"):
-            contact_info = f"\nContato: {metadata.get('contact_name', '')} ({metadata.get('contact_number', '')})"
-        user_input = (
-            f"[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]\n"
-            f"Mensagem recebida do lead via CRM:\n"
-            f"\"{user_input}\"\n"
-            f"Ticket ID: {ticket_id_for_reply}{contact_info}\n\n"
+        reply_instruction = (
             f"INSTRUÇÃO OBRIGATÓRIA: Use a ferramenta 'enviar_mensagem_direta' com "
-            f"ticket_id={ticket_id_for_reply} para enviar sua resposta diretamente ao lead no CRM."
+            f"ticket_id={ticket_id_for_reply} para enviar sua resposta ao lead no CRM."
         )
+    elif contact_number_for_reply:
+        reply_instruction = (
+            f"INSTRUÇÃO OBRIGATÓRIA: Use a ferramenta 'enviar_mensagem' com "
+            f"numero={contact_number_for_reply} para enviar sua resposta ao lead no CRM."
+        )
+    else:
+        reply_instruction = (
+            "INSTRUÇÃO OBRIGATÓRIA: Chame listar_tickets_pendentes para encontrar o ticket "
+            "deste lead e use enviar_mensagem_direta para responder."
+        )
+
+    user_input = (
+        f"[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]\n"
+        f"Mensagem recebida do lead via CRM:\n"
+        f"\"{user_input}\"\n"
+        + (f"Ticket ID: {ticket_id_for_reply}" if ticket_id_for_reply else "")
+        + contact_info + "\n\n"
+        + reply_instruction
+    )
 
     # Cria registro de run (salva input original, sem o bloco de instrução)
     run_id = str(uuid.uuid4())
@@ -1190,24 +1262,40 @@ async def webhook_trigger(
         try:
             output, steps = await execute_agent(agent, user_input, workspace_creds, db=db, session_id=session_id)
 
-            # Fallback automático: se o agente gerou texto mas não chamou enviar_mensagem_direta,
+            # Fallback automático: se o agente gerou texto mas não chamou enviar_mensagem,
             # envia a resposta programaticamente para garantir que o lead receba
             sent_via_tool = any("enviar_mensagem" in s.get("tool", "") for s in steps)
-            if not sent_via_tool and ticket_id_for_reply and workspace_creds.get("clickmassa"):
+            if not sent_via_tool and workspace_creds.get("clickmassa"):
+                creds_cm = workspace_creds["clickmassa"]
+                send_result = None
                 try:
-                    send_result = await execute_tool("clickmassa", "enviar_mensagem_direta", {
-                        "ticket_id": str(ticket_id_for_reply),
-                        "mensagem": output,
-                    }, workspace_creds["clickmassa"])
-                    steps.append({
-                        "tool": "auto_send_fallback",
-                        "params": {"ticket_id": ticket_id_for_reply},
-                        "result": send_result,
-                        "iteration": 0,
-                    })
-                    logger.info(f"Webhook {agent_id}: resposta enviada automaticamente ao ticket {ticket_id_for_reply}")
+                    if ticket_id_for_reply:
+                        logger.info(f"[Webhook {agent_id}] fallback: enviando via ticket_id={ticket_id_for_reply}")
+                        send_result = await execute_tool("clickmassa", "enviar_mensagem_direta", {
+                            "ticket_id": str(ticket_id_for_reply),
+                            "mensagem": output,
+                        }, creds_cm)
+                    elif contact_number_for_reply:
+                        logger.info(f"[Webhook {agent_id}] fallback: enviando via numero={contact_number_for_reply}")
+                        send_result = await execute_tool("clickmassa", "enviar_mensagem", {
+                            "numero": contact_number_for_reply,
+                            "mensagem": output,
+                        }, creds_cm)
+                    else:
+                        logger.warning(f"[Webhook {agent_id}] fallback: sem ticket_id nem contact_number — não foi possível enviar automaticamente")
+
+                    if send_result:
+                        logger.info(f"[Webhook {agent_id}] fallback result: {json.dumps(send_result, ensure_ascii=False, default=str)[:200]}")
+                        steps.append({
+                            "tool": "auto_send_fallback",
+                            "params": {"ticket_id": ticket_id_for_reply, "numero": contact_number_for_reply},
+                            "result": send_result,
+                            "iteration": 0,
+                        })
                 except Exception as send_err:
-                    logger.error(f"Webhook {agent_id}: falha no envio automático: {send_err}")
+                    logger.error(f"[Webhook {agent_id}] fallback FALHOU: {send_err}", exc_info=True)
+            elif not sent_via_tool:
+                logger.warning(f"[Webhook {agent_id}] fallback ignorado: credenciais clickmassa não encontradas. creds keys={list(workspace_creds.keys())}")
 
             await db.runs.update_one(
                 {"run_id": run_id},
