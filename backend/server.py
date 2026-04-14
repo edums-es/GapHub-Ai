@@ -29,6 +29,8 @@ allowed_origins = {
     FRONTEND_URL,
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://gap-hub-ai.vercel.app",
+    "https://gap-hub-ai-git-main-tarotbgs.vercel.app",
 }
 
 mongo_client = AsyncIOMotorClient(MONGO_URL)
