@@ -1253,6 +1253,7 @@ async def process_pending_leads(
     request: Request,
     agent_id: str,
     body: PendingLeadsRequest = None,
+    x_webhook_secret: Optional[str] = Header(default=None, alias="X-Webhook-Secret"),
 ):
     """
     CORREÇÃO BUG 4 — Mecanismo de polling automático de leads pendentes.
@@ -1263,26 +1264,41 @@ async def process_pending_leads(
     3. O agente lê as mensagens do ticket, entende o contexto e responde automaticamente
 
     Pode ser chamado:
-    - Manualmente pelo frontend
-    - Via webhook do CRM quando um novo ticket fica pendente
+    - Manualmente pelo frontend (via JWT jwtAuth)
+    - Via automadores como N8n ou CRMs nativos enviando Header X-Webhook-Secret
     - Via APScheduler (cron) configurado para rodar a cada N minutos
     - Via Railway cron job (se configurado no railway.toml)
     """
     if body is None:
         body = PendingLeadsRequest()
 
-    user = await get_current_user(request)
     db = request.app.state.db
 
-    agent = await db.agents.find_one({"agent_id": agent_id, "workspace_id": user["workspace_id"]}, {"_id": 0})
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    # Verifica autenticação flexível: X-Webhook-Secret (N8n/CRMs) ou token JWT (Dashboard User)
+    agent = None
+    workspace_id = None
+
+    if x_webhook_secret:
+        agent = await db.agents.find_one({"agent_id": agent_id})
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agente não encontrado")
+        stored_secret = agent.get("webhook_secret", "")
+        if not stored_secret or not hmac.compare_digest(stored_secret, x_webhook_secret):
+            raise HTTPException(status_code=401, detail="Webhook secret inválido")
+        workspace_id = agent.get("workspace_id")
+    else:
+        user = await get_current_user(request)
+        workspace_id = user["workspace_id"]
+        agent = await db.agents.find_one({"agent_id": agent_id, "workspace_id": workspace_id}, {"_id": 0})
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agente não encontrado no workspace")
+
     if agent.get("status") != "active":
         raise HTTPException(status_code=400, detail="Agente inativo — ative-o antes de processar leads")
 
     # Carrega credenciais (mesmo padrão do run_agent)
     workspace_creds = {}
-    creds_list = await db.credentials.find({"workspace_id": user["workspace_id"]}, {"_id": 0}).to_list(50)
+    creds_list = await db.credentials.find({"workspace_id": workspace_id}, {"_id": 0}).to_list(50)
     for cred in creds_list:
         decrypted = {}
         for k, v in cred.get("data", {}).items():
@@ -1290,13 +1306,13 @@ async def process_pending_leads(
                 decrypted[k] = decrypt(str(v))
             except Exception:
                 decrypted[k] = v
-        decrypted["workspace_id"] = user["workspace_id"]
+        decrypted["workspace_id"] = workspace_id
         workspace_creds[cred["mcp_id"]] = decrypted
 
     # Injeta credenciais MCP por agente
     agent_mcp_creds = await _get_agent_mcp_credentials(db, agent_id)
     if agent_mcp_creds:
-        agent_mcp_creds["workspace_id"] = user["workspace_id"]
+        agent_mcp_creds["workspace_id"] = workspace_id
         workspace_creds["clickmassa"] = agent_mcp_creds
 
     # Dispara processamento em background (não bloqueia a resposta HTTP)
