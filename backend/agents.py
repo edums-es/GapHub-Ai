@@ -1031,18 +1031,13 @@ class WebhookPayload(BaseModel):
 async def webhook_trigger(
     request: Request,
     agent_id: str,
-    body: WebhookPayload,
-    x_webhook_secret: Optional[str] = Header(default=None, alias="X-Webhook-Secret"),
 ):
     """
     Endpoint público para disparar agentes via webhook.
-    
-    Autenticação: Header X-Webhook-Secret deve coincidir com o secret do agente.
-    Retorna: run_id para rastreamento assíncrono.
+    Aceita o payload nativo do GapHub ou Webhooks nativos do ClickMassa (Evo).
     """
     db = request.app.state.db
 
-    # Busca agente sem autenticação JWT (endpoint público por design)
     agent = await db.agents.find_one({"agent_id": agent_id})
     if not agent:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
@@ -1050,7 +1045,6 @@ async def webhook_trigger(
     if agent.get("status") != "active":
         raise HTTPException(status_code=403, detail="Agente inativo — ative-o antes de usar webhooks")
 
-    # Verifica secret do webhook
     stored_secret = agent.get("webhook_secret", "")
     if not stored_secret:
         raise HTTPException(
@@ -1058,12 +1052,63 @@ async def webhook_trigger(
             detail="Este agente não tem webhook configurado. Acesse Configurações do Agente para gerar um secret."
         )
 
-    if not x_webhook_secret:
-        raise HTTPException(status_code=401, detail="Header X-Webhook-Secret obrigatório")
+    # 1. Validação de Autenticação Flexível (Suporta X-Webhook-Secret ou Authorization Bearer)
+    auth_header = request.headers.get("Authorization", "")
+    secret_header = request.headers.get("X-Webhook-Secret", "")
+    token_provided = secret_header or auth_header.replace("Bearer ", "").strip()
 
-    # Comparação segura contra timing attacks
-    if not hmac.compare_digest(stored_secret, x_webhook_secret):
+    if not token_provided:
+        # Se na plataforma CRM o usuário não passou Header, nós permitimos tentar parear
+        # Caso contrário falha. No ClickMassa, o token vai no Header de Auth
+        raise HTTPException(status_code=401, detail="Header de autenticação obrigatório")
+
+    if not hmac.compare_digest(stored_secret, token_provided):
         raise HTTPException(status_code=401, detail="Webhook secret inválido")
+
+    # 2. Parseamento de Payload Flexível
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Corpo da requisição deve ser JSON válido")
+
+    user_input = ""
+    metadata = {}
+    session_id = None
+
+    # Detecta se é um Webhook Nativo ClickMassa Evo (Event: messages.upsert)
+    if "event" in payload or "messages" in payload or "ticket" in payload:
+        # ClickMassa/Z-API style payload
+        # Exemplos comuns: Eventos de mensagem
+        logger.info(f"Recebido Webhook externo CRM no Agente {agent_id}. Payload keys: {list(payload.keys())}")
+        
+        # Filtro de Loop Infinito: não processa mensagens enviadas por nós mesmos
+        is_from_me = payload.get("fromMe", False) or payload.get("message", {}).get("fromMe", False)
+        if is_from_me:
+            return {"status": "ignored", "message": "Mensagem gerada pelo próprio sistema ignorada"}
+        
+        # Extrai a mensagem e meta
+        if "body" in payload:
+            user_input = payload["body"]
+        elif "message" in payload and "body" in payload["message"]:
+            user_input = payload["message"]["body"]
+        elif "text" in payload:
+            user_input = payload["text"]
+            
+        ticket_id = payload.get("ticketId") or payload.get("ticket", {}).get("id") or ""
+        contact_id = payload.get("contactId") or payload.get("contact", {}).get("id") or ""
+        
+        metadata = {"crm_webhook": True, "ticket_id": ticket_id, "contact_id": contact_id}
+        if ticket_id:
+            session_id = f"webhook_{agent_id}_{ticket_id}"
+
+    else:
+        # Padrão nativo do GapHub
+        user_input = payload.get("input", "")
+        metadata = payload.get("metadata", {})
+        session_id = payload.get("session_id")
+
+    if not user_input:
+        return {"status": "ignored", "message": "Nenhum input processável encontrado no payload do webhook."}
 
     # Carrega credenciais do workspace
     workspace_id = agent.get("workspace_id", "")
@@ -1071,31 +1116,44 @@ async def webhook_trigger(
     try:
         cred_docs = await db.credentials.find({"workspace_id": workspace_id}).to_list(50)
         for cred_doc in cred_docs:
-            raw = cred_doc.get("encrypted_data") or cred_doc.get("data", "")
-            if raw:
+            decrypted = {}
+            for k, v in cred_doc.get("data", {}).items():
                 try:
-                    decrypted = fernet.decrypt(raw.encode() if isinstance(raw, str) else raw)
-                    workspace_creds[cred_doc["mcp_id"]] = json.loads(decrypted)
+                    decrypted[k] = decrypt(str(v))
                 except Exception:
-                    workspace_creds[cred_doc["mcp_id"]] = cred_doc.get("data", {})
+                    decrypted[k] = v
+            decrypted["workspace_id"] = workspace_id
+            workspace_creds[cred_doc["mcp_id"]] = decrypted
     except Exception as e:
         logger.warning(f"Webhook: erro ao carregar credenciais do workspace {workspace_id}: {e}")
 
-    # Injeta metadata no input se fornecida
-    user_input = body.input
-    if body.metadata:
-        meta_str = json.dumps(body.metadata, ensure_ascii=False)
-        user_input = f"{body.input}\n\n[Contexto do webhook: {meta_str}]"
+    try:
+        agent_mcp_creds = await _get_agent_mcp_credentials(db, agent_id)
+        if agent_mcp_creds:
+            agent_mcp_creds["workspace_id"] = workspace_id
+            workspace_creds["clickmassa"] = agent_mcp_creds
+    except Exception as e:
+        logger.warning(f"Webhook: erro ao carregar MCP credentials do agente {agent_id}: {e}")
+
+    # Força contexto do CRM no prompt
+    if metadata.get("ticket_id"):
+        meta_str = json.dumps(metadata, ensure_ascii=False)
+        user_input = (
+            f"Mensagem recebida do lead via Webhook:\n"
+            f"\"{user_input}\"\n\n"
+            f"MISSÃO: Responda a este lead.\n"
+            f"1. Se desejar usar ferramentas, você DEVE usar o ticket_id={metadata.get('ticket_id')} na ferramenta enviar_mensagem_direta e buscar_mensagens_ticket."
+        )
 
     # Cria registro de run
     run_id = str(uuid.uuid4())
-    session_id = body.session_id or f"webhook_{agent_id}_{run_id[:8]}"
+    session_id = session_id or f"webhook_{agent_id}_{run_id[:8]}"
     run_doc = {
         "run_id": run_id,
         "agent_id": agent_id,
         "workspace_id": workspace_id,
-        "input": body.input,
-        "metadata": body.metadata or {},
+        "input": user_input,
+        "metadata": metadata,
         "session_id": session_id,
         "status": "running",
         "source": "webhook",
@@ -1106,13 +1164,15 @@ async def webhook_trigger(
     # Executa agente em background (fire-and-forget)
     async def run_background():
         try:
-            result = await execute_agent(agent, user_input, workspace_creds, db=db, session_id=session_id)
+            # CORREÇÃO BUG 1: execute_agent retorna tupla (output, steps), não dict.
+            # Usar result.get() causava AttributeError silencioso que marcava o run como failed.
+            output, steps = await execute_agent(agent, user_input, workspace_creds, db=db, session_id=session_id)
             await db.runs.update_one(
                 {"run_id": run_id},
                 {"$set": {
                     "status": "completed",
-                    "output": result.get("output", ""),
-                    "steps": result.get("steps", []),
+                    "output": output,
+                    "steps": steps,
                     "completed_at": datetime.now(timezone.utc),
                 }}
             )
@@ -1162,6 +1222,236 @@ async def rotate_webhook_secret(request: Request, agent_id: str):
         "webhook_secret": new_secret,
         "webhook_url": f"/api/webhook/{agent_id}",
         "message": "Secret gerado. Guarde-o com segurança — não será exibido novamente."
+    }
+
+
+
+
+# ── Lead Queue Auto-Processor ─────────────────────────────────────────────────
+# NOVA FUNCIONALIDADE: Permite que o agente processe automaticamente todos os
+# tickets pendentes do CRM sem precisar de intervenção manual.
+#
+# Uso via API:
+#   POST /api/agents/{agent_id}/process-pending-leads
+#
+# Uso via agendamento automático (APScheduler — ver scheduler.py):
+#   Crie um schedule com cron_expression="* * * * *" e
+#   input_message="PROCESSAR_LEADS_PENDENTES" apontando para este agente.
+#
+# Uso via webhook do CRM (recomendado):
+#   Configure o CRM para chamar POST /api/webhook/{agent_id} quando um novo
+#   ticket entrar na fila pendente.
+
+class PendingLeadsRequest(BaseModel):
+    """Parâmetros opcionais para o processamento de leads pendentes."""
+    max_leads: int = 10  # máximo de leads a processar por execução
+    auto_respond: bool = True  # se True, o agente responde automaticamente
+
+
+@agents_router.post("/agents/{agent_id}/process-pending-leads")
+async def process_pending_leads(
+    request: Request,
+    agent_id: str,
+    body: PendingLeadsRequest = None,
+):
+    """
+    CORREÇÃO BUG 4 — Mecanismo de polling automático de leads pendentes.
+
+    Este endpoint:
+    1. Busca todos os tickets com status 'pending' no CRM via ClickMassa
+    2. Para cada ticket, dispara o agente de IA em background
+    3. O agente lê as mensagens do ticket, entende o contexto e responde automaticamente
+
+    Pode ser chamado:
+    - Manualmente pelo frontend
+    - Via webhook do CRM quando um novo ticket fica pendente
+    - Via APScheduler (cron) configurado para rodar a cada N minutos
+    - Via Railway cron job (se configurado no railway.toml)
+    """
+    if body is None:
+        body = PendingLeadsRequest()
+
+    user = await get_current_user(request)
+    db = request.app.state.db
+
+    agent = await db.agents.find_one({"agent_id": agent_id, "workspace_id": user["workspace_id"]}, {"_id": 0})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    if agent.get("status") != "active":
+        raise HTTPException(status_code=400, detail="Agente inativo — ative-o antes de processar leads")
+
+    # Carrega credenciais (mesmo padrão do run_agent)
+    workspace_creds = {}
+    creds_list = await db.credentials.find({"workspace_id": user["workspace_id"]}, {"_id": 0}).to_list(50)
+    for cred in creds_list:
+        decrypted = {}
+        for k, v in cred.get("data", {}).items():
+            try:
+                decrypted[k] = decrypt(str(v))
+            except Exception:
+                decrypted[k] = v
+        decrypted["workspace_id"] = user["workspace_id"]
+        workspace_creds[cred["mcp_id"]] = decrypted
+
+    # Injeta credenciais MCP por agente
+    agent_mcp_creds = await _get_agent_mcp_credentials(db, agent_id)
+    if agent_mcp_creds:
+        agent_mcp_creds["workspace_id"] = user["workspace_id"]
+        workspace_creds["clickmassa"] = agent_mcp_creds
+
+    # Dispara processamento em background (não bloqueia a resposta HTTP)
+    async def process_leads_background():
+        processed = 0
+        errors = 0
+        try:
+            from tools import execute_tool
+            # Busca tickets pendentes via ferramenta do CRM
+            pending_result = await execute_tool(
+                "clickmassa", "listar_tickets_pendentes", {}, workspace_creds.get("clickmassa", {})
+            )
+
+            tickets = pending_result.get("tickets", [])
+            if isinstance(pending_result, list):
+                tickets = pending_result
+
+            logger.info(f"[PendingLeads] Agente {agent_id}: {len(tickets)} tickets pendentes encontrados")
+
+            for ticket in tickets[:body.max_leads]:
+                ticket_id = str(ticket.get("id", ""))
+                contact = ticket.get("contact", {})
+                contact_number = contact.get("number", "")
+                contact_name = contact.get("name", contact_number)
+
+                if not ticket_id:
+                    continue
+
+                # Evita processar o mesmo ticket múltiplas vezes
+                # Verifica se já existe run recente para este ticket
+                recent_run = await db.runs.find_one({
+                    "agent_id": agent_id,
+                    "metadata.ticket_id": ticket_id,
+                    "status": {"$in": ["completed", "running"]},
+                    "started_at": {"$gte": datetime.now(timezone.utc) - timedelta(minutes=30)},
+                })
+                if recent_run:
+                    logger.info(f"[PendingLeads] Ticket {ticket_id} já processado recentemente, pulando.")
+                    continue
+
+                # Monta input para o agente com contexto do lead
+                last_msg = ticket.get("lastMessage", {})
+                last_msg_body = last_msg.get("body", "") if last_msg else ""
+
+                agent_input = (
+                    f"Novo lead pendente na fila do CRM.\n"
+                    f"Ticket ID: {ticket_id}\n"
+                    f"Contato: {contact_name} ({contact_number})\n"
+                    f"Última mensagem: {last_msg_body}\n\n"
+                    f"Por favor:\n"
+                    f"1. Use buscar_mensagens_ticket(ticket_id=\"{ticket_id}\") para ler a conversa completa\n"
+                    f"2. Entenda o contexto e a necessidade do lead\n"
+                    f"3. Responda ao lead de forma adequada usando enviar_mensagem_direta ou a ferramenta de mensagem disponível\n"
+                    f"4. Se necessário, feche o ticket ou atribua a um atendente humano"
+                )
+
+                run_id = f"run_{uuid.uuid4().hex[:12]}"
+                session_id = f"pending_{agent_id}_{ticket_id}"
+                now = datetime.now(timezone.utc)
+
+                run_doc = {
+                    "run_id": run_id,
+                    "agent_id": agent_id,
+                    "workspace_id": user["workspace_id"],
+                    "user_id": "system_auto",
+                    "session_id": session_id,
+                    "status": "running",
+                    "input": agent_input,
+                    "output": None,
+                    "steps": [],
+                    "error": None,
+                    "started_at": now,
+                    "completed_at": None,
+                    "source": "pending_leads_processor",
+                    "metadata": {"ticket_id": ticket_id, "contact_number": contact_number},
+                }
+                await db.runs.insert_one(run_doc)
+
+                try:
+                    output, steps = await asyncio.wait_for(
+                        execute_agent(agent, agent_input, workspace_creds, db, session_id),
+                        timeout=90.0
+                    )
+                    await db.runs.update_one(
+                        {"run_id": run_id},
+                        {"$set": {
+                            "status": "completed",
+                            "output": output,
+                            "steps": steps,
+                            "completed_at": datetime.now(timezone.utc),
+                        }}
+                    )
+                    processed += 1
+                    logger.info(f"[PendingLeads] Ticket {ticket_id} processado com sucesso")
+                except asyncio.TimeoutError:
+                    await db.runs.update_one(
+                        {"run_id": run_id},
+                        {"$set": {
+                            "status": "failed",
+                            "error": "Timeout de 90s ao processar ticket",
+                            "completed_at": datetime.now(timezone.utc),
+                        }}
+                    )
+                    errors += 1
+                except Exception as e:
+                    await db.runs.update_one(
+                        {"run_id": run_id},
+                        {"$set": {
+                            "status": "failed",
+                            "error": str(e),
+                            "completed_at": datetime.now(timezone.utc),
+                        }}
+                    )
+                    errors += 1
+                    logger.error(f"[PendingLeads] Erro ao processar ticket {ticket_id}: {e}")
+
+        except Exception as e:
+            logger.error(f"[PendingLeads] Erro geral no processamento: {e}")
+
+        logger.info(f"[PendingLeads] Processamento concluído: {processed} sucesso, {errors} erros")
+
+    asyncio.create_task(process_leads_background())
+
+    return {
+        "agent_id": agent_id,
+        "status": "processing",
+        "max_leads": body.max_leads,
+        "message": f"Processamento de leads pendentes iniciado em background. Máximo: {body.max_leads} leads.",
+    }
+
+
+@agents_router.get("/agents/{agent_id}/process-pending-leads/status")
+async def pending_leads_status(request: Request, agent_id: str):
+    """Retorna estatísticas dos últimos processamentos automáticos de leads."""
+    user = await get_current_user(request)
+    db = request.app.state.db
+
+    agent = await db.agents.find_one({"agent_id": agent_id, "workspace_id": user["workspace_id"]}, {"_id": 0})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+
+    # Runs das últimas 24h com source=pending_leads_processor
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    runs = await db.runs.find({
+        "agent_id": agent_id,
+        "source": "pending_leads_processor",
+        "started_at": {"$gte": cutoff},
+    }, {"_id": 0}).sort("started_at", -1).to_list(50)
+
+    return {
+        "agent_id": agent_id,
+        "runs_24h": len(runs),
+        "completed": sum(1 for r in runs if r.get("status") == "completed"),
+        "failed": sum(1 for r in runs if r.get("status") == "failed"),
+        "recent_runs": runs[:10],
     }
 
 
