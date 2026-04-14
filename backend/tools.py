@@ -182,9 +182,15 @@ async def execute_clickmassa_tool(tool_name: str, params: dict, credentials: dic
             elif tool_name == "adicionar_etiquetas":
                 return await c.patch(f"{base_url}/v1/contacts/{params['id']}", json={"tags": params["tags"]}, headers=headers)
             elif tool_name == "enviar_mensagem":
-                cid = params.get("canal_id") or canal_id
-                body = {"number": params["numero"], "body": params["mensagem"], "externalKey": f"mcp-{__import__('time').time()}"}
-                return await c.post(f"{base_url}/v1/api/external/{cid}", json=body, headers=headers)
+                numero = params.get("numero")
+                if not numero:
+                    return {"error": "Número é obrigatório."}
+                search = await c.get(f"{base_url}/tickets?searchParam={numero}&showAll=true", headers=headers)
+                tickets = search.json().get("tickets", [])
+                ticket = next((t for t in tickets if t["contact"]["number"] == numero and t["status"] in ["open", "pending"]), None)
+                if not ticket:
+                    return {"error": f"Nenhum ticket aberto para {numero}"}
+                return await c.post(f"{base_url}/messages/{ticket['id']}", json={"body": params["mensagem"]}, headers=headers)
             elif tool_name == "enviar_mensagem_direta":
                 ticket_id = params.get("ticket_id")
                 if not ticket_id:

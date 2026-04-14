@@ -12,8 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copia código da aplicação
 COPY . .
 
-# Inicializa o banco na primeira execução
-RUN echo '#!/bin/sh\npython db/init.py && uvicorn server:app --host 0.0.0.0 --port 8000' > /entrypoint.sh && chmod +x /entrypoint.sh
+# CORREÇÃO: Usa printf para garantir newline real no entrypoint script
+# (echo com \n em sh não cria newline real em todos os sistemas)
+RUN printf '#!/bin/sh\npython db/init.py\nuvicorn server:app --host 0.0.0.0 --port ${PORT:-8000}\n' > /entrypoint.sh && chmod +x /entrypoint.sh
 
 EXPOSE 8000
 
