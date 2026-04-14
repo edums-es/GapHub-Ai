@@ -1091,12 +1091,23 @@ async def webhook_trigger(
         or {}
     )
 
-    # --- from_me ---
+    # --- from_me: verifica por TODOS os campos possíveis ---
+    sender_obj = data_wrap.get("sender", {}) if isinstance(data_wrap.get("sender"), dict) else {}
+    sender_type = (
+        sender_obj.get("type", "")
+        or payload.get("senderType", "")
+        or payload.get("authorType", "")
+        or ""
+    )
     from_me = bool(
         payload.get("fromMe")
         or msg_obj.get("fromMe")
         or data_wrap.get("fromMe")
         or (data_wrap.get("message_type") in ("outgoing", 1))
+        or (str(data_wrap.get("message_type", "")).lower() == "outgoing")
+        or (str(sender_type).lower() in ("agent", "agent_bot", "bot", "system"))
+        or payload.get("isFromBot")
+        or payload.get("isBot")
     )
 
     # --- is_private / notification ---
@@ -1114,6 +1125,8 @@ async def webhook_trigger(
     )
     if str(msg_type).lower() == "notification":
         is_private = True
+
+    logger.info(f"[Webhook {agent_id}] filtros: from_me={from_me} is_private={is_private} msg_type={msg_type} sender_type={sender_type}")
 
     if from_me:
         logger.info(f"[Webhook {agent_id}] ignorado: fromMe=True")
@@ -1171,6 +1184,39 @@ async def webhook_trigger(
     contact_id = str(contact_obj.get("id") or payload.get("contactId") or "")
 
     logger.info(f"[Webhook {agent_id}] extraído: input='{user_input[:60]}' ticket_id='{ticket_id}' contact_number='{contact_number}' contact_name='{contact_name}'")
+
+    # ── PROTEÇÃO ANTI-LOOP ─────────────────────────────────────────────────────
+    # Camada 1: deduplicação por ID da mensagem
+    msg_id = str(
+        msg_obj.get("id")
+        or payload.get("messageId")
+        or payload.get("id")
+        or data_wrap.get("id")
+        or ""
+    ).strip()
+    if msg_id:
+        already = await db.webhook_dedup.find_one({"msg_id": msg_id, "agent_id": agent_id})
+        if already:
+            logger.info(f"[Webhook {agent_id}] ignorado: msg_id={msg_id} já processado")
+            return {"status": "ignored", "reason": "Mensagem já processada (deduplicação por ID)"}
+        await db.webhook_dedup.insert_one({
+            "msg_id": msg_id, "agent_id": agent_id,
+            "created_at": datetime.now(timezone.utc)
+        })
+
+    # Camada 2: cooldown de 60s por ticket — evita loop mesmo que fromMe não seja detectado
+    if ticket_id:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=60)
+        recent = await db.runs.find_one({
+            "agent_id": agent_id,
+            "metadata.ticket_id": ticket_id,
+            "source": "webhook",
+            "started_at": {"$gte": cutoff},
+        })
+        if recent:
+            logger.info(f"[Webhook {agent_id}] ignorado: cooldown 60s para ticket {ticket_id}")
+            return {"status": "ignored", "reason": "Cooldown: ticket respondido há menos de 60s"}
+    # ───────────────────────────────────────────────────────────────────────────
 
     metadata = {
         "crm_webhook": True,

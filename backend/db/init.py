@@ -81,6 +81,17 @@ async def create_indexes(db):
         name="chat_sessions_ttl_90d"
     )
 
+    # ── webhook_dedup — deduplicação de mensagens (TTL 24h) ───────────────
+    await db.webhook_dedup.create_index(
+        [("msg_id", pymongo.ASCENDING), ("agent_id", pymongo.ASCENDING)],
+        unique=True, name="webhook_dedup_msg_agent"
+    )
+    await db.webhook_dedup.create_index(
+        "created_at",
+        expireAfterSeconds=24 * 3600,  # remove automaticamente após 24h
+        name="webhook_dedup_ttl_24h"
+    )
+
     # ── runs ───────────────────────────────────────────────────────────────
     await db.runs.create_index(
         [("agent_id", pymongo.ASCENDING), ("started_at", pymongo.DESCENDING)],
