@@ -789,9 +789,12 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
    Sempre leia todos os prefixos antes de tirar conclusões sobre o que o lead quer.
 
 2. QUANDO ENVIAR MENSAGEM AO LEAD:
-   - USE "enviar_mensagem_direta" ou "enviar_mensagem" SOMENTE quando o usuário pedir EXPLICITAMENTE:
-     "responda ao lead", "envie uma mensagem", "contate o cliente", "mande para o número X".
-   - Em NENHUMA outra situação envie mensagem ao lead por conta própria.
+   - Se o input começar com "[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]", você DEVE
+     obrigatoriamente usar "enviar_mensagem_direta" com o ticket_id indicado para responder ao lead.
+     Gere a resposta e chame a ferramenta — não apenas escreva o texto.
+   - Em outros contextos, use "enviar_mensagem_direta" SOMENTE quando explicitamente pedido:
+     "responda ao lead", "envie uma mensagem", "contate o cliente".
+   - NUNCA envie mensagens por conta própria em outros cenários.
 
 3. QUANDO USAR NOTA INTERNA (enviar_nota_interna):
    - Para TODA análise, qualificação, classificação, resumo, observação ou alerta de uso interno.
@@ -1084,8 +1087,14 @@ async def webhook_trigger(
         # Filtro de Loop Infinito: não processa mensagens enviadas por nós mesmos
         is_from_me = payload.get("fromMe", False) or payload.get("message", {}).get("fromMe", False)
         if is_from_me:
-            return {"status": "ignored", "message": "Mensagem gerada pelo próprio sistema ignorada"}
-        
+            return {"status": "ignored", "message": "Mensagem enviada pela empresa — ignorada para evitar loop"}
+
+        # Filtro: notas internas e notificações não devem acionar o agente
+        is_private = payload.get("isPrivate", False) or payload.get("message", {}).get("isPrivate", False)
+        msg_type = payload.get("messageType") or payload.get("message", {}).get("messageType", "chat")
+        if is_private or msg_type == "notification":
+            return {"status": "ignored", "message": "Nota interna ou notificação ignorada"}
+
         # Extrai a mensagem e meta
         if "body" in payload:
             user_input = payload["body"]
@@ -1093,11 +1102,20 @@ async def webhook_trigger(
             user_input = payload["message"]["body"]
         elif "text" in payload:
             user_input = payload["text"]
-            
+
         ticket_id = payload.get("ticketId") or payload.get("ticket", {}).get("id") or ""
-        contact_id = payload.get("contactId") or payload.get("contact", {}).get("id") or ""
-        
-        metadata = {"crm_webhook": True, "ticket_id": ticket_id, "contact_id": contact_id}
+        contact = payload.get("contact", payload.get("ticket", {}).get("contact", {}))
+        contact_id = str(contact.get("id", payload.get("contactId", "")))
+        contact_number = str(contact.get("number", contact.get("phone", "")))
+        contact_name = contact.get("name", "")
+
+        metadata = {
+            "crm_webhook": True,
+            "ticket_id": ticket_id,
+            "contact_id": contact_id,
+            "contact_number": contact_number,
+            "contact_name": contact_name,
+        }
         if ticket_id:
             session_id = f"webhook_{agent_id}_{ticket_id}"
 
@@ -1135,24 +1153,30 @@ async def webhook_trigger(
     except Exception as e:
         logger.warning(f"Webhook: erro ao carregar MCP credentials do agente {agent_id}: {e}")
 
-    # Força contexto do CRM no prompt
-    if metadata.get("ticket_id"):
-        meta_str = json.dumps(metadata, ensure_ascii=False)
+    # Monta input enriquecido com instrução explícita (apenas para o agente, não salvo no histórico)
+    original_input = user_input  # preserva para exibição limpa no histórico
+    ticket_id_for_reply = metadata.get("ticket_id", "")
+    if ticket_id_for_reply:
+        contact_info = ""
+        if metadata.get("contact_name") or metadata.get("contact_number"):
+            contact_info = f"\nContato: {metadata.get('contact_name', '')} ({metadata.get('contact_number', '')})"
         user_input = (
-            f"Mensagem recebida do lead via Webhook:\n"
-            f"\"{user_input}\"\n\n"
-            f"==== ATENÇÃO - MISSÃO OBRIGATÓRIA ====\n"
-            f"Você NÃO PODE apenas dizer a resposta neste chat. Para que o lead receba sua resposta no WhatsApp, você DEVE OBRIGATORIAMENTE invocar a ferramenta 'enviar_mensagem_direta' (ou equivalente de enviar mensagem) utilizando o parâmetro ticket_id={metadata.get('ticket_id')}."
+            f"[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]\n"
+            f"Mensagem recebida do lead via CRM:\n"
+            f"\"{user_input}\"\n"
+            f"Ticket ID: {ticket_id_for_reply}{contact_info}\n\n"
+            f"INSTRUÇÃO OBRIGATÓRIA: Use a ferramenta 'enviar_mensagem_direta' com "
+            f"ticket_id={ticket_id_for_reply} para enviar sua resposta diretamente ao lead no CRM."
         )
 
-    # Cria registro de run
+    # Cria registro de run (salva input original, sem o bloco de instrução)
     run_id = str(uuid.uuid4())
     session_id = session_id or f"webhook_{agent_id}_{run_id[:8]}"
     run_doc = {
         "run_id": run_id,
         "agent_id": agent_id,
         "workspace_id": workspace_id,
-        "input": user_input,
+        "input": original_input,  # input limpo para exibição no histórico
         "metadata": metadata,
         "session_id": session_id,
         "status": "running",
@@ -1164,9 +1188,27 @@ async def webhook_trigger(
     # Executa agente em background (fire-and-forget)
     async def run_background():
         try:
-            # CORREÇÃO BUG 1: execute_agent retorna tupla (output, steps), não dict.
-            # Usar result.get() causava AttributeError silencioso que marcava o run como failed.
             output, steps = await execute_agent(agent, user_input, workspace_creds, db=db, session_id=session_id)
+
+            # Fallback automático: se o agente gerou texto mas não chamou enviar_mensagem_direta,
+            # envia a resposta programaticamente para garantir que o lead receba
+            sent_via_tool = any("enviar_mensagem" in s.get("tool", "") for s in steps)
+            if not sent_via_tool and ticket_id_for_reply and workspace_creds.get("clickmassa"):
+                try:
+                    send_result = await execute_tool("clickmassa", "enviar_mensagem_direta", {
+                        "ticket_id": str(ticket_id_for_reply),
+                        "mensagem": output,
+                    }, workspace_creds["clickmassa"])
+                    steps.append({
+                        "tool": "auto_send_fallback",
+                        "params": {"ticket_id": ticket_id_for_reply},
+                        "result": send_result,
+                        "iteration": 0,
+                    })
+                    logger.info(f"Webhook {agent_id}: resposta enviada automaticamente ao ticket {ticket_id_for_reply}")
+                except Exception as send_err:
+                    logger.error(f"Webhook {agent_id}: falha no envio automático: {send_err}")
+
             await db.runs.update_one(
                 {"run_id": run_id},
                 {"$set": {
@@ -1177,7 +1219,7 @@ async def webhook_trigger(
                 }}
             )
         except Exception as e:
-            logger.error(f"Webhook run {run_id} falhou: {e}")
+            logger.error(f"Webhook run {run_id} falhou: {e}", exc_info=True)
             await db.runs.update_one(
                 {"run_id": run_id},
                 {"$set": {
