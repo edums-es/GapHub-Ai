@@ -790,11 +790,20 @@ export default function AgentBuilder() {
                     <div style={{ fontSize: 9, fontFamily: "monospace", color: "#A3A3A3", wordBreak: "break-all", background: "#0A0A0A", padding: "4px 6px", borderRadius: 4, marginBottom: 6 }}>
                       {webhookSecret}
                     </div>
-                    <div style={{ fontSize: 9, color: "#737373", marginBottom: 6 }}>URL: /api/webhook/{agent.agent_id}</div>
-                    <button
-                      onClick={() => { navigator.clipboard?.writeText(webhookSecret); setWebhookSecret(null); }}
-                      style={{ width: "100%", padding: "5px", background: "rgba(16,185,129,0.15)", border: "1px solid rgba(16,185,129,0.3)", borderRadius: 6, color: "#10B981", fontSize: 10, cursor: "pointer", fontWeight: 600 }}
-                    >Copiar e fechar</button>
+                    <div style={{ fontSize: 9, color: "#737373", marginBottom: 2 }}>URL do Webhook:</div>
+                    <div style={{ fontSize: 9, fontFamily: "monospace", color: "#A3A3A3", wordBreak: "break-all", background: "#0A0A0A", padding: "4px 6px", borderRadius: 4, marginBottom: 6 }}>
+                      {process.env.REACT_APP_BACKEND_URL}/api/webhook/{agent.agent_id}
+                    </div>
+                    <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
+                      <button
+                        onClick={() => navigator.clipboard?.writeText(`${process.env.REACT_APP_BACKEND_URL}/api/webhook/${agent.agent_id}`)}
+                        style={{ flex: 1, padding: "5px", background: "rgba(59,130,246,0.1)", border: "1px solid rgba(59,130,246,0.3)", borderRadius: 6, color: "#3B82F6", fontSize: 10, cursor: "pointer", fontWeight: 600 }}
+                      >Copiar URL</button>
+                      <button
+                        onClick={() => { navigator.clipboard?.writeText(webhookSecret); setWebhookSecret(null); }}
+                        style={{ flex: 1, padding: "5px", background: "rgba(16,185,129,0.15)", border: "1px solid rgba(16,185,129,0.3)", borderRadius: 6, color: "#10B981", fontSize: 10, cursor: "pointer", fontWeight: 600 }}
+                      >Copiar Secret e fechar</button>
+                    </div>
                   </div>
                 ) : webhookInfo?.has_webhook ? (
                   // Webhook já configurado
@@ -803,22 +812,28 @@ export default function AgentBuilder() {
                       <div style={{ width: 6, height: 6, background: "#10B981", borderRadius: "50%" }} />
                       <span style={{ fontSize: 10, color: "#10B981", fontWeight: 600 }}>Webhook ativo</span>
                     </div>
-                    <div style={{ fontSize: 9, color: "#737373", marginBottom: 6, wordBreak: "break-all" }}>
-                      /api/webhook/{agent.agent_id}
+                    <div style={{ fontSize: 9, fontFamily: "monospace", color: "#A3A3A3", wordBreak: "break-all", background: "#0A0A0A", padding: "4px 6px", borderRadius: 4, marginBottom: 6 }}>
+                      {process.env.REACT_APP_BACKEND_URL}/api/webhook/{agent.agent_id}
                     </div>
-                    <button
-                      onClick={async () => {
-                        setGeneratingWebhook(true);
-                        try {
-                          const { data } = await axios.post(`${API}/agents/${agent.agent_id}/webhook-secret`, {}, { withCredentials: true });
-                          setWebhookSecret(data.webhook_secret);
-                          setWebhookInfo(i => ({ ...i, has_webhook: true }));
-                        } catch (e) { alert(e.response?.data?.detail || "Erro ao rotacionar"); }
-                        setGeneratingWebhook(false);
-                      }}
-                      disabled={generatingWebhook}
-                      style={{ width: "100%", padding: "5px", background: "transparent", border: "1px solid #27272A", borderRadius: 6, color: "#737373", fontSize: 10, cursor: "pointer" }}
-                    >{generatingWebhook ? "..." : "Rotacionar secret"}</button>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      <button
+                        onClick={() => navigator.clipboard?.writeText(`${process.env.REACT_APP_BACKEND_URL}/api/webhook/${agent.agent_id}`)}
+                        style={{ flex: 1, padding: "5px", background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.2)", borderRadius: 6, color: "#3B82F6", fontSize: 10, cursor: "pointer", fontWeight: 600 }}
+                      >Copiar URL</button>
+                      <button
+                        onClick={async () => {
+                          setGeneratingWebhook(true);
+                          try {
+                            const { data } = await axios.post(`${API}/agents/${agent.agent_id}/webhook-secret`, {}, { withCredentials: true });
+                            setWebhookSecret(data.webhook_secret);
+                            setWebhookInfo(i => ({ ...i, has_webhook: true }));
+                          } catch (e) { alert(e.response?.data?.detail || "Erro ao rotacionar"); }
+                          setGeneratingWebhook(false);
+                        }}
+                        disabled={generatingWebhook}
+                        style={{ flex: 1, padding: "5px", background: "transparent", border: "1px solid #27272A", borderRadius: 6, color: "#737373", fontSize: 10, cursor: "pointer" }}
+                      >{generatingWebhook ? "..." : "Rotacionar secret"}</button>
+                    </div>
                   </div>
                 ) : (
                   // Sem webhook ainda

@@ -1,23 +1,33 @@
 import React, { useEffect, useState } from "react";
-import { Search, Store, Star, Download, Lock, CheckCircle, ExternalLink, Zap, X, Eye } from "lucide-react";
+import { Search, Store, Star, Download, Lock, CheckCircle, ExternalLink, Zap, X, Eye, Database, Globe, MessageCircle, Calendar, Mail, Send, CreditCard, Github, Hash, Bot, Wrench, Webhook } from "lucide-react";
 import axios from "axios";
 import Layout from "@/components/Layout";
 
 const API = process.env.REACT_APP_BACKEND_URL + "/api";
 
-const ICON_MAP = {
-  database: "🗄️", search: "🔍", globe: "🌐", "message-circle": "💬",
-  calendar: "📅", mail: "✉️", zap: "⚡", send: "📤", "credit-card": "💳",
-  github: "🐙", hash: "#", bot: "🤖",
+const ICON_COMPONENTS = {
+  database: Database,
+  search: Search,
+  globe: Globe,
+  "message-circle": MessageCircle,
+  calendar: Calendar,
+  mail: Mail,
+  zap: Zap,
+  send: Send,
+  "credit-card": CreditCard,
+  github: Github,
+  hash: Hash,
+  bot: Bot,
+  webhook: Webhook,
 };
+
+function MCPIcon({ icon, color, size = 22 }) {
+  const Component = ICON_COMPONENTS[icon] || Wrench;
+  return <Component size={size} color={color || "#A3A3A3"} strokeWidth={1.5} />;
+}
 
 function PreviewModal({ mcp, isInstalled, onClose, onInstall }) {
   const statusLabels = { active: "Ativo", coming_soon: "Em breve" };
-  const ICON_MAP_LOCAL = {
-    database: "🗄️", search: "🔍", globe: "🌐", "message-circle": "💬",
-    calendar: "📅", mail: "✉️", zap: "⚡", send: "📤", "credit-card": "💳",
-    github: "🐙", hash: "#", bot: "🤖",
-  };
   return (
     <div
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
@@ -27,8 +37,8 @@ function PreviewModal({ mcp, isInstalled, onClose, onInstall }) {
         {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
           <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
-            <div style={{ width: 52, height: 52, background: `${mcp.color}15`, border: `1px solid ${mcp.color}30`, borderRadius: 14, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, flexShrink: 0 }}>
-              {ICON_MAP_LOCAL[mcp.icon] || "🔧"}
+            <div style={{ width: 52, height: 52, background: `${mcp.color}15`, border: `1px solid ${mcp.color}30`, borderRadius: 14, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <MCPIcon icon={mcp.icon} color={mcp.color} size={24} />
             </div>
             <div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
@@ -39,7 +49,7 @@ function PreviewModal({ mcp, isInstalled, onClose, onInstall }) {
               </div>
               <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
                 <span style={{ fontSize: 12, color: "#737373" }}>v{mcp.version} · por {mcp.author}</span>
-                {mcp.rating > 0 && <span style={{ fontSize: 12, color: "#A3A3A3" }}>⭐ {mcp.rating}</span>}
+                {mcp.rating > 0 && <span style={{ fontSize: 12, color: "#A3A3A3", display: "flex", alignItems: "center", gap: 3 }}><Star size={11} fill="#F59E0B" color="#F59E0B" /> {mcp.rating}</span>}
                 {mcp.installs > 0 && <span style={{ fontSize: 12, color: "#737373" }}>{mcp.installs.toLocaleString()} instalações</span>}
               </div>
             </div>
@@ -123,8 +133,8 @@ function MCPCard({ mcp, isInstalled, onInstall, onPreview }) {
 
       {/* Header */}
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-        <div style={{ width: 46, height: 46, background: `${mcp.color}15`, border: `1px solid ${mcp.color}30`, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>
-          {ICON_MAP[mcp.icon] || "🔧"}
+        <div style={{ width: 46, height: 46, background: `${mcp.color}15`, border: `1px solid ${mcp.color}30`, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <MCPIcon icon={mcp.icon} color={mcp.color} size={22} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
