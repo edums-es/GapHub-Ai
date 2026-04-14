@@ -143,7 +143,7 @@ MCP_CATALOG = [
         "category": "automation",
         "icon": "zap",
         "color": "#FF6D00",
-        "status": "coming_soon",
+        "status": "active",
         "version": "1.0",
         "author": "GapHub",
         "installs": 0,
