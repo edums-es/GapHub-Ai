@@ -186,23 +186,33 @@ async def execute_clickmassa_tool(tool_name: str, params: dict, credentials: dic
                 body = {"number": params["numero"], "body": params["mensagem"], "externalKey": f"mcp-{__import__('time').time()}"}
                 return await c.post(f"{base_url}/v1/api/external/{cid}", json=body, headers=headers)
             elif tool_name == "enviar_mensagem_direta":
-                search = await c.get(f"{base_url}/tickets?searchParam={params['numero']}&showAll=true", headers=headers)
-                tickets = search.json().get("tickets", [])
-                ticket = next((t for t in tickets if t["contact"]["number"] == params["numero"] and t["status"] in ["open", "pending"]), None)
-                if not ticket:
-                    return {"error": f"Nenhum ticket aberto para {params['numero']}"}
-                return await c.post(f"{base_url}/messages/{ticket['id']}", json={"body": params["mensagem"]}, headers=headers)
+                ticket_id = params.get("ticket_id")
+                if not ticket_id:
+                    # Fallback to search by number if ticket_id is omitted
+                    numero = params.get("numero")
+                    if not numero:
+                        return {"error": "É necessário fornecer o ticket_id ou o numero."}
+                    search = await c.get(f"{base_url}/tickets?searchParam={numero}&showAll=true", headers=headers)
+                    tickets = search.json().get("tickets", [])
+                    ticket = next((t for t in tickets if t["contact"]["number"] == numero and t["status"] in ["open", "pending"]), None)
+                    if not ticket:
+                        return {"error": f"Nenhum ticket aberto para o número {numero}"}
+                    ticket_id = ticket['id']
+                
+                # Send the message using the exact ticket_id
+                return await c.post(f"{base_url}/messages/{ticket_id}", json={"body": params["mensagem"]}, headers=headers)
             elif tool_name == "enviar_nota_interna":
-                search = await c.get(f"{base_url}/tickets?searchParam={params['numero']}&showAll=true", headers=headers)
-                tickets = search.json().get("tickets", [])
-                ticket = next((t for t in tickets if t["contact"]["number"] == params["numero"]), None)
-                if not ticket:
-                    # Try by ticket_id directly
-                    ticket_id = params.get("ticket_id")
-                    if ticket_id:
-                        return await c.post(f"{base_url}/messages/{ticket_id}", json={"body": params["nota"], "isPrivate": True}, headers=headers)
-                    return {"error": f"Ticket não encontrado para {params['numero']}"}
-                return await c.post(f"{base_url}/messages/{ticket['id']}", json={"body": params["nota"], "isPrivate": True}, headers=headers)
+                ticket_id = params.get("ticket_id")
+                if not ticket_id:
+                    numero = params.get("numero", "")
+                    search = await c.get(f"{base_url}/tickets?searchParam={numero}&showAll=true", headers=headers)
+                    tickets = search.json().get("tickets", [])
+                    ticket = next((t for t in tickets if t["contact"]["number"] == numero), None)
+                    if not ticket:
+                        return {"error": f"Ticket não encontrado para {numero}"}
+                    ticket_id = ticket['id']
+                    
+                return await c.post(f"{base_url}/messages/{ticket_id}", json={"body": params["nota"], "isPrivate": True}, headers=headers)
             elif tool_name == "buscar_mensagens_ticket":
                 ticket_id = params.get("ticket_id")
                 page = params.get("pagina", 1)
@@ -385,13 +395,14 @@ def _make_tool_def(mcp_id: str, name: str, description: str) -> dict:
             "canal_id": {"type": "string"},
         },
         "enviar_mensagem_direta": {
-            "numero": {"type": "string"},
-            "mensagem": {"type": "string", "description": "Texto a enviar ao lead — SOMENTE quando pedido explicitamente para responder ou contatar o lead"},
+            "numero": {"type": "string", "description": "Número (DDI+DDD) — OPCIONAL se usar ticket_id"},
+            "ticket_id": {"type": "string", "description": "ID exato do ticket — MODO MAIS SEGURO e PREFERÍVEL para enviar mensagem e garantir que chega na conversa certa"},
+            "mensagem": {"type": "string", "description": "Texto a enviar ao lead — SOMENTE quando explicitamente pedido"},
         },
         "enviar_nota_interna": {
-            "numero": {"type": "string", "description": "Número do contato para buscar o ticket"},
+            "numero": {"type": "string", "description": "Número do contato — OPCIONAL se usar ticket_id"},
+            "ticket_id": {"type": "string", "description": "ID direto do ticket (MUITO mais seguro que o número)"},
             "nota": {"type": "string", "description": "Texto da nota interna — NÃO aparece para o lead. Use para análises, qualificações e observações"},
-            "ticket_id": {"type": "string", "description": "ID direto do ticket (alternativo ao número)"},
         },
         "buscar_mensagens_ticket": {
             "ticket_id": {"type": "string", "description": "ID do ticket para buscar conversa completa com direção de mensagens"},
