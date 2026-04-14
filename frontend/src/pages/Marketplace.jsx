@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Search, Store, Star, Download, Lock, CheckCircle, ExternalLink, Zap } from "lucide-react";
+import { Search, Store, Star, Download, Lock, CheckCircle, ExternalLink, Zap, X, Eye } from "lucide-react";
 import axios from "axios";
 import Layout from "@/components/Layout";
 
@@ -11,7 +11,102 @@ const ICON_MAP = {
   github: "🐙", hash: "#", bot: "🤖",
 };
 
-function MCPCard({ mcp, isInstalled, onInstall }) {
+function PreviewModal({ mcp, isInstalled, onClose, onInstall }) {
+  const statusLabels = { active: "Ativo", coming_soon: "Em breve" };
+  const ICON_MAP_LOCAL = {
+    database: "🗄️", search: "🔍", globe: "🌐", "message-circle": "💬",
+    calendar: "📅", mail: "✉️", zap: "⚡", send: "📤", "credit-card": "💳",
+    github: "🐙", hash: "#", bot: "🤖",
+  };
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div style={{ background: "#111111", border: "1px solid #27272A", borderRadius: 16, width: "100%", maxWidth: 560, maxHeight: "85vh", overflow: "auto", padding: 28 }}>
+        {/* Header */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
+          <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+            <div style={{ width: 52, height: 52, background: `${mcp.color}15`, border: `1px solid ${mcp.color}30`, borderRadius: 14, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, flexShrink: 0 }}>
+              {ICON_MAP_LOCAL[mcp.icon] || "🔧"}
+            </div>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                <span style={{ fontFamily: "Outfit, sans-serif", fontWeight: 800, fontSize: 18, color: "white" }}>{mcp.name}</span>
+                <span style={{ fontSize: 11, color: mcp.status === "active" ? "#10B981" : "#F97316", background: mcp.status === "active" ? "rgba(16,185,129,0.1)" : "rgba(249,115,22,0.1)", border: `1px solid ${mcp.status === "active" ? "rgba(16,185,129,0.2)" : "rgba(249,115,22,0.2)"}`, borderRadius: 100, padding: "2px 8px", fontWeight: 600 }}>
+                  {statusLabels[mcp.status] || mcp.status}
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: "#737373" }}>v{mcp.version} · por {mcp.author}</span>
+                {mcp.rating > 0 && <span style={{ fontSize: 12, color: "#A3A3A3" }}>⭐ {mcp.rating}</span>}
+                {mcp.installs > 0 && <span style={{ fontSize: 12, color: "#737373" }}>{mcp.installs.toLocaleString()} instalações</span>}
+              </div>
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#737373", padding: 4 }}>
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Description */}
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#737373", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>Descrição</div>
+          <p style={{ fontSize: 14, color: "#A3A3A3", lineHeight: 1.7, margin: 0 }}>{mcp.description}</p>
+        </div>
+
+        {/* Tools */}
+        {mcp.tools?.length > 0 && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#737373", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 10 }}>
+              {mcp.tools.length} Ferramentas disponíveis
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {mcp.tools.map(t => (
+                <div key={t.name} style={{ display: "flex", gap: 10, padding: "8px 12px", background: "#1A1A1A", borderRadius: 8, border: "1px solid #27272A" }}>
+                  <span style={{ fontSize: 11, fontFamily: "JetBrains Mono, monospace", color: mcp.color || "#F97316", fontWeight: 600, whiteSpace: "nowrap" }}>{t.name}</span>
+                  {t.description && <span style={{ fontSize: 11, color: "#737373", lineHeight: 1.4 }}>{t.description}</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Credentials required */}
+        {mcp.credentials_required?.length > 0 && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#737373", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>Credenciais necessárias</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {mcp.credentials_required.map(c => (
+                <span key={c} style={{ fontSize: 11, color: "#A3A3A3", background: "#2A2A2A", border: "1px solid #27272A", borderRadius: 6, padding: "3px 8px", display: "flex", alignItems: "center", gap: 4 }}>
+                  <Lock size={10} /> {c}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Action button */}
+        <div style={{ borderTop: "1px solid #27272A", paddingTop: 16, display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <button
+            onClick={onClose}
+            style={{ padding: "8px 18px", background: "transparent", border: "1px solid #27272A", borderRadius: 8, color: "#737373", fontSize: 13, cursor: "pointer", fontFamily: "Outfit, sans-serif" }}
+          >Fechar</button>
+          {mcp.status === "active" && (
+            <button
+              onClick={() => { onClose(); onInstall(mcp); }}
+              style={{ padding: "8px 20px", background: isInstalled ? "rgba(16,185,129,0.15)" : "rgba(249,115,22,0.15)", color: isInstalled ? "#10B981" : "#F97316", border: `1px solid ${isInstalled ? "rgba(16,185,129,0.3)" : "rgba(249,115,22,0.3)"}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 6, fontFamily: "Outfit, sans-serif" }}
+            >
+              {isInstalled ? <><CheckCircle size={14} /> Configurar</> : <><Zap size={14} /> Instalar</>}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MCPCard({ mcp, isInstalled, onInstall, onPreview }) {
   const statusLabels = { active: "Ativo", coming_soon: "Em breve" };
   return (
     <div
@@ -75,19 +170,28 @@ function MCPCard({ mcp, isInstalled, onInstall }) {
           )}
         </div>
 
-        {mcp.status === "active" ? (
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <button
-            onClick={() => onInstall(mcp)}
-            data-testid={`install-${mcp.id}`}
-            style={{ padding: "6px 14px", background: isInstalled ? "rgba(16,185,129,0.1)" : "rgba(249,115,22,0.1)", color: isInstalled ? "#10B981" : "#F97316", border: `1px solid ${isInstalled ? "rgba(16,185,129,0.3)" : "rgba(249,115,22,0.3)"}`, borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 5, transition: "all 0.2s", fontFamily: "Outfit, sans-serif" }}
-            onMouseEnter={e => { if (!isInstalled) { e.currentTarget.style.background = "rgba(249,115,22,0.2)"; } }}
-            onMouseLeave={e => { if (!isInstalled) { e.currentTarget.style.background = "rgba(249,115,22,0.1)"; } }}
-          >
-            {isInstalled ? <><CheckCircle size={12} /> Configurar</> : <><Zap size={12} /> Instalar</>}
-          </button>
-        ) : (
-          <span style={{ fontSize: 12, color: "#737373", fontStyle: "italic" }}>Em breve</span>
-        )}
+            onClick={() => onPreview(mcp)}
+            title="Ver detalhes"
+            style={{ padding: "5px 10px", background: "transparent", border: "1px solid #27272A", borderRadius: 6, cursor: "pointer", color: "#737373", fontSize: 11, display: "flex", alignItems: "center", gap: 4, transition: "all 0.2s" }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(59,130,246,0.4)"; e.currentTarget.style.color = "#3B82F6"; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = "#27272A"; e.currentTarget.style.color = "#737373"; }}
+          ><Eye size={11} /> Ver</button>
+          {mcp.status === "active" ? (
+            <button
+              onClick={() => onInstall(mcp)}
+              data-testid={`install-${mcp.id}`}
+              style={{ padding: "6px 14px", background: isInstalled ? "rgba(16,185,129,0.1)" : "rgba(249,115,22,0.1)", color: isInstalled ? "#10B981" : "#F97316", border: `1px solid ${isInstalled ? "rgba(16,185,129,0.3)" : "rgba(249,115,22,0.3)"}`, borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 5, transition: "all 0.2s", fontFamily: "Outfit, sans-serif" }}
+              onMouseEnter={e => { if (!isInstalled) { e.currentTarget.style.background = "rgba(249,115,22,0.2)"; } }}
+              onMouseLeave={e => { if (!isInstalled) { e.currentTarget.style.background = "rgba(249,115,22,0.1)"; } }}
+            >
+              {isInstalled ? <><CheckCircle size={12} /> Configurar</> : <><Zap size={12} /> Instalar</>}
+            </button>
+          ) : (
+            <span style={{ fontSize: 12, color: "#737373", fontStyle: "italic" }}>Em breve</span>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -101,6 +205,9 @@ export default function Marketplace() {
   const [activeCategory, setActiveCategory] = useState("all");
   const [search, setSearch] = useState("");
   const [selectedMcp, setSelectedMcp] = useState(null);
+  const [minRating, setMinRating] = useState(0); // 0 = sem filtro de rating
+  const [showInstalled, setShowInstalled] = useState(false); // filtro: apenas instalados
+  const [previewMcp, setPreviewMcp] = useState(null); // MCP sendo visualizado no modal de preview
 
   const fetchData = async () => {
     setLoading(true);
@@ -120,7 +227,15 @@ export default function Marketplace() {
     if (e.key === "Enter") fetchData();
   };
 
+  // Filtragem client-side por rating mínimo e status de instalação
+  const filteredMcps = mcps.filter(mcp => {
+    if (minRating > 0 && (mcp.rating || 0) < minRating) return false;
+    if (showInstalled && !installed.includes(mcp.id)) return false;
+    return true;
+  });
+
   const handleInstall = (mcp) => setSelectedMcp(mcp);
+  const handlePreview = (mcp) => setPreviewMcp(mcp);
 
   return (
     <Layout>
@@ -146,8 +261,8 @@ export default function Marketplace() {
           />
         </div>
 
-        {/* Categories */}
-        <div style={{ display: "flex", gap: 8, marginBottom: 24, flexWrap: "wrap" }}>
+        {/* Categories + Filters bar */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
           {categories.map(cat => (
             <button
               key={cat.id}
@@ -160,15 +275,78 @@ export default function Marketplace() {
           ))}
         </div>
 
+        {/* Secondary filters row: rating + installed */}
+        <div style={{ display: "flex", gap: 10, marginBottom: 24, alignItems: "center", flexWrap: "wrap" }}>
+          {/* Rating filter */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, background: "#1A1A1A", border: "1px solid #27272A", borderRadius: 8, padding: "4px 10px" }}>
+            <Star size={12} fill={minRating > 0 ? "#F59E0B" : "transparent"} color="#F59E0B" />
+            <span style={{ fontSize: 11, color: "#A3A3A3", whiteSpace: "nowrap" }}>Rating mínimo:</span>
+            {[0, 4, 4.5].map(r => (
+              <button
+                key={r}
+                onClick={() => setMinRating(r)}
+                style={{
+                  padding: "3px 8px", borderRadius: 6, border: "1px solid",
+                  cursor: "pointer", fontSize: 11, fontWeight: 600, transition: "all 0.2s",
+                  background: minRating === r ? "rgba(245,158,11,0.15)" : "transparent",
+                  borderColor: minRating === r ? "rgba(245,158,11,0.4)" : "#27272A",
+                  color: minRating === r ? "#F59E0B" : "#737373",
+                }}
+              >
+                {r === 0 ? "Todos" : `${r}+`}
+              </button>
+            ))}
+          </div>
+
+          {/* Installed filter */}
+          <button
+            onClick={() => setShowInstalled(s => !s)}
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "6px 12px", borderRadius: 8, border: "1px solid", cursor: "pointer",
+              fontSize: 12, fontWeight: 600, fontFamily: "Outfit, sans-serif", transition: "all 0.2s",
+              background: showInstalled ? "rgba(249,115,22,0.1)" : "transparent",
+              borderColor: showInstalled ? "rgba(249,115,22,0.4)" : "#27272A",
+              color: showInstalled ? "#F97316" : "#737373",
+            }}
+          >
+            <CheckCircle size={12} /> Apenas instalados
+          </button>
+
+          {/* Results count */}
+          {!loading && (
+            <span style={{ fontSize: 12, color: "#737373", marginLeft: "auto" }}>
+              {filteredMcps.length} resultado{filteredMcps.length !== 1 ? "s" : ""}
+              {(minRating > 0 || showInstalled) && (
+                <button
+                  onClick={() => { setMinRating(0); setShowInstalled(false); }}
+                  style={{ marginLeft: 8, fontSize: 11, color: "#F97316", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
+                >
+                  Limpar filtros
+                </button>
+              )}
+            </span>
+          )}
+        </div>
+
         {/* Grid */}
         {loading ? (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
             {[1, 2, 3, 4].map(i => <div key={i} style={{ height: 200, background: "#1A1A1A", borderRadius: 12, border: "1px solid #27272A" }} />)}
           </div>
+        ) : filteredMcps.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "60px 20px", color: "#737373" }}>
+            <Store size={40} style={{ marginBottom: 12, opacity: 0.3 }} />
+            <p style={{ fontSize: 14, margin: 0 }}>Nenhum MCP encontrado com os filtros selecionados.</p>
+            <button onClick={() => { setMinRating(0); setShowInstalled(false); setActiveCategory("all"); setSearch(""); }}
+              style={{ marginTop: 12, fontSize: 12, color: "#F97316", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>
+              Limpar todos os filtros
+            </button>
+          </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
-            {mcps.map(mcp => (
-              <MCPCard key={mcp.id} mcp={mcp} isInstalled={installed.includes(mcp.id)} onInstall={handleInstall} />
+            {filteredMcps.map(mcp => (
+              <MCPCard key={mcp.id} mcp={mcp} isInstalled={installed.includes(mcp.id)} onInstall={handleInstall} onPreview={handlePreview} />
             ))}
           </div>
         )}
@@ -176,6 +354,16 @@ export default function Marketplace() {
         {/* Install Modal */}
         {selectedMcp && (
           <InstallModal mcp={selectedMcp} onClose={() => { setSelectedMcp(null); fetchData(); }} />
+        )}
+
+        {/* Preview Modal */}
+        {previewMcp && (
+          <PreviewModal
+            mcp={previewMcp}
+            isInstalled={installed.includes(previewMcp.id)}
+            onClose={() => setPreviewMcp(null)}
+            onInstall={handleInstall}
+          />
         )}
       </div>
     </Layout>

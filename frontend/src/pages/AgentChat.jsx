@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import axios from "axios";
 import Layout from "@/components/Layout";
-import { Bot, Send, ChevronDown, ChevronRight, Wrench, AlertCircle, RefreshCw, MessageSquare, Plus, Sparkles, X } from "lucide-react";
+import { Bot, Send, ChevronDown, ChevronRight, Wrench, AlertCircle, RefreshCw, MessageSquare, Plus, Sparkles, X, Wifi } from "lucide-react";
 
 const API = process.env.REACT_APP_BACKEND_URL + "/api";
 
@@ -65,10 +65,14 @@ function ChatMessage({ msg }) {
           <div style={{ background: "#1A1A1A", border: "1px solid #27272A", borderRadius: "4px 14px 14px 14px", padding: "12px 16px", display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ display: "flex", gap: 4 }}>
               {[0, 1, 2].map(i => (
-                <div key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: "#3B82F6", animation: `bounce 1.2s infinite`, animationDelay: `${i * 0.2}s` }} />
+                <div key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: msg.pendingTool ? "#10B981" : "#3B82F6", animation: `bounce 1.2s infinite`, animationDelay: `${i * 0.2}s` }} />
               ))}
             </div>
-            <span style={{ fontSize: 12, color: "#737373" }}>Processando...</span>
+            <span style={{ fontSize: 12, color: "#737373" }}>
+              {msg.pendingTool
+                ? <><Wrench size={11} style={{ display: "inline", marginRight: 4, color: "#10B981" }} />{msg.pendingTool.split("__")[1] || msg.pendingTool}...</>
+                : "Processando..."}
+            </span>
           </div>
         ) : msg.error ? (
           <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: "4px 14px 14px 14px", padding: "12px 16px" }}>
@@ -115,8 +119,16 @@ export default function AgentChat() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [loadingAgents, setLoadingAgents] = useState(true);
+  // session_id persiste enquanto a conversa não for limpa — garante memória contínua
+  const [sessionId, setSessionId] = useState(() => `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  const [streamingEnabled, setStreamingEnabled] = useState(true); // Bug Fix #4: SSE streaming
+  // Histórico paginado — mostra apenas os últimos N messages; "Carregar mais" busca anteriores
+  const PAGE_SIZE = 20;
+  const [displayCount, setDisplayCount] = useState(PAGE_SIZE);
   const messagesEndRef = useRef(null);
+  const messagesTopRef = useRef(null);
   const inputRef = useRef(null);
+  const abortControllerRef = useRef(null);
 
   useEffect(() => {
     axios.get(`${API}/agents`, { withCredentials: true })
@@ -132,46 +144,182 @@ export default function AgentChat() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSend = useCallback(async (text) => {
-    const msg = (text || input).trim();
-    if (!msg || !selectedAgent || sending) return;
+  // Bug Fix #4 — SSE streaming: recebe tokens à medida que são gerados,
+  // eliminando o congelamento da tela durante processamento do agente.
+  const handleSendStreaming = useCallback(async (msg) => {
+    const agentId = selectedAgent.agent_id;
+    const userMsgId = Date.now();
+    const agentMsgId = userMsgId + 1;
 
-    setInput("");
-    setSending(true);
+    const userMsg = { id: userMsgId, role: "user", content: msg, timestamp: new Date() };
+    const agentMsg = { id: agentMsgId, role: "agent", loading: true, content: "", steps: [], timestamp: new Date() };
+    setMessages(m => [...m, userMsg, agentMsg]);
 
-    const userMsg = { id: Date.now(), role: "user", content: msg, timestamp: new Date() };
-    const loadingMsg = { id: Date.now() + 1, role: "agent", loading: true, timestamp: new Date() };
+    // Cria AbortController para poder cancelar stream se necessário
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    try {
+      const response = await fetch(`${API}/agents/${agentId}/run/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ input: msg, session_id: sessionId }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      // Remove loading indicator assim que a resposta começa
+      setMessages(m => m.map(x => x.id === agentMsgId ? { ...x, loading: false } : x));
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const raw = line.slice(6).trim();
+          if (!raw) continue;
+
+          try {
+            const event = JSON.parse(raw);
+            if (event.type === "done") {
+              // Mensagem final com output completo e steps
+              setMessages(m => m.map(x =>
+                x.id === agentMsgId
+                  ? { ...x, loading: false, content: event.output, steps: event.steps || [] }
+                  : x
+              ));
+            } else if (event.type === "error") {
+              setMessages(m => m.map(x =>
+                x.id === agentMsgId
+                  ? { ...x, loading: false, error: event.error }
+                  : x
+              ));
+            } else if (event.type === "token") {
+              // Token streaming incremental
+              setMessages(m => m.map(x =>
+                x.id === agentMsgId
+                  ? { ...x, content: (x.content || "") + event.text }
+                  : x
+              ));
+            } else if (event.type === "tool_start") {
+              // Show "running tool..." indicator while tool executes
+              setMessages(m => m.map(x =>
+                x.id === agentMsgId
+                  ? { ...x, loading: true, pendingTool: event.tool }
+                  : x
+              ));
+            } else if (event.type === "tool_done") {
+              // Tool finished — append to steps list and clear loading
+              setMessages(m => m.map(x =>
+                x.id === agentMsgId
+                  ? {
+                      ...x,
+                      loading: false,
+                      pendingTool: null,
+                      steps: [...(x.steps || []), {
+                        tool: event.tool,
+                        params: {},
+                        result: event.result,
+                      }],
+                    }
+                  : x
+              ));
+            }
+          } catch (_) {
+            // Linha não-JSON, ignora
+          }
+        }
+      }
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      const err = e.message || "Erro ao processar. Verifique se o agente tem credenciais configuradas.";
+      setMessages(m => m.map(x =>
+        x.id === agentMsgId ? { ...x, loading: false, error: err } : x
+      ));
+    }
+  }, [selectedAgent, sessionId]);
+
+  const handleSendFallback = useCallback(async (msg) => {
+    const userMsgId = Date.now();
+    const agentMsgId = userMsgId + 1;
+    const userMsg = { id: userMsgId, role: "user", content: msg, timestamp: new Date() };
+    const loadingMsg = { id: agentMsgId, role: "agent", loading: true, timestamp: new Date() };
     setMessages(m => [...m, userMsg, loadingMsg]);
 
     try {
       const { data } = await axios.post(
         `${API}/agents/${selectedAgent.agent_id}/run`,
-        { input: msg },
+        { input: msg, session_id: sessionId },
         { withCredentials: true }
       );
       setMessages(m => m.map(x =>
-        x.id === loadingMsg.id
+        x.id === agentMsgId
           ? { ...x, loading: false, content: data.output, steps: data.steps || [] }
           : x
       ));
     } catch (e) {
       const err = e.response?.data?.detail || "Erro ao processar. Verifique se o agente tem credenciais configuradas.";
       setMessages(m => m.map(x =>
-        x.id === loadingMsg.id
-          ? { ...x, loading: false, error: err }
-          : x
+        x.id === agentMsgId ? { ...x, loading: false, error: err } : x
       ));
+    }
+  }, [selectedAgent, sessionId]);
+
+  const handleSend = useCallback(async (text) => {
+    const msg = (text || input).trim();
+    if (!msg || !selectedAgent || sending) return;
+    setInput("");
+    setSending(true);
+    try {
+      if (streamingEnabled) {
+        await handleSendStreaming(msg);
+      } else {
+        await handleSendFallback(msg);
+      }
     } finally {
       setSending(false);
       inputRef.current?.focus();
     }
-  }, [input, selectedAgent, sending]);
+  }, [input, selectedAgent, sending, streamingEnabled, handleSendStreaming, handleSendFallback]);
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
-  const clearChat = () => setMessages([]);
+  const clearChat = () => {
+    // Cancela qualquer stream em andamento
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    setMessages([]);
+    setSending(false);
+    setDisplayCount(PAGE_SIZE);
+    // Nova conversa = novo session_id = histórico limpo no backend
+    setSessionId(`session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  };
+
+  // Carrega mais mensagens antigas (paginação client-side)
+  const handleLoadMore = () => {
+    const prevScrollHeight = messagesTopRef.current?.parentNode?.scrollHeight || 0;
+    setDisplayCount(c => c + PAGE_SIZE);
+    // Após render, mantém posição de scroll (não salta para o topo)
+    setTimeout(() => {
+      const node = messagesTopRef.current?.parentNode;
+      if (node) node.scrollTop = node.scrollHeight - prevScrollHeight;
+    }, 50);
+  };
 
   return (
     <Layout>
@@ -203,13 +351,27 @@ export default function AgentChat() {
                 onChange={e => {
                   const a = agents.find(x => x.agent_id === e.target.value);
                   setSelectedAgent(a);
-                  clearChat();
+                  clearChat(); // limpa chat, gera novo session_id e reseta paginação
                 }}
                 style={{ padding: "8px 14px", background: "#1A1A1A", border: "1px solid #27272A", borderRadius: 8, color: "white", fontSize: 13, fontFamily: "IBM Plex Sans, sans-serif", outline: "none", minWidth: 180, cursor: "pointer" }}
               >
                 {agents.map(a => <option key={a.agent_id} value={a.agent_id}>{a.name}</option>)}
               </select>
             )}
+            {/* Streaming toggle */}
+            <button
+              onClick={() => setStreamingEnabled(s => !s)}
+              title={streamingEnabled ? "Streaming ativo (clique para desativar)" : "Streaming inativo (clique para ativar)"}
+              style={{
+                padding: "8px 10px", background: streamingEnabled ? "rgba(16,185,129,0.08)" : "#1A1A1A",
+                border: `1px solid ${streamingEnabled ? "rgba(16,185,129,0.4)" : "#27272A"}`,
+                borderRadius: 8, color: streamingEnabled ? "#10B981" : "#404040",
+                cursor: "pointer", display: "flex", alignItems: "center", gap: 5, fontSize: 11,
+                transition: "all 0.2s",
+              }}
+            >
+              <Wifi size={12} /> SSE
+            </button>
             {messages.length > 0 && (
               <button
                 onClick={clearChat}
@@ -262,7 +424,21 @@ export default function AgentChat() {
               </div>
             ) : (
               <>
-                {messages.map(msg => <ChatMessage key={msg.id} msg={msg} />)}
+                <div ref={messagesTopRef} />
+                {/* Botão "Carregar mais" — aparece quando há mensagens além do displayCount */}
+                {messages.length > displayCount && (
+                  <div style={{ textAlign: "center", marginBottom: 12 }}>
+                    <button
+                      onClick={handleLoadMore}
+                      style={{ padding: "6px 16px", background: "#1A1A1A", border: "1px solid #27272A", borderRadius: 20, color: "#A3A3A3", cursor: "pointer", fontSize: 12, fontFamily: "IBM Plex Sans, sans-serif", transition: "all 0.2s" }}
+                      onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(249,115,22,0.4)"; e.currentTarget.style.color = "#F97316"; }}
+                      onMouseLeave={e => { e.currentTarget.style.borderColor = "#27272A"; e.currentTarget.style.color = "#A3A3A3"; }}
+                    >
+                      ↑ Carregar {Math.min(PAGE_SIZE, messages.length - displayCount)} mensagem(ns) anteriores
+                    </button>
+                  </div>
+                )}
+                {messages.slice(-displayCount).map(msg => <ChatMessage key={msg.id} msg={msg} />)}
                 <div ref={messagesEndRef} />
               </>
             )}

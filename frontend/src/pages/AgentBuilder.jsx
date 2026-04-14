@@ -468,6 +468,20 @@ function RunModal({ agent, onClose }) {
   );
 }
 
+// Bug Fix #5 — Validação do agente antes de salvar
+function validateAgent(agentName, nodes, llmConfig) {
+  const errors = [];
+  if (!agentName.trim()) errors.push("O agente precisa de um nome.");
+  const hasTrigger = nodes.some(n => n.type === "trigger");
+  const hasLLM = nodes.some(n => n.type === "llm");
+  const hasOutput = nodes.some(n => n.type === "output");
+  if (!hasTrigger) errors.push("É necessário pelo menos um nó Trigger.");
+  if (!hasLLM) errors.push("É necessário pelo menos um nó LLM.");
+  if (!hasOutput) errors.push("É necessário pelo menos um nó Output.");
+  if (!llmConfig.api_key?.trim()) errors.push("Configure a API Key do LLM no painel de configuração.");
+  return errors;
+}
+
 export default function AgentBuilder() {
   const { agentId } = useParams();
   const navigate = useNavigate();
@@ -487,6 +501,56 @@ export default function AgentBuilder() {
   const [showRunModal, setShowRunModal] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
   const [loading, setLoading] = useState(!isNew);
+  const [validationErrors, setValidationErrors] = useState([]);
+  // Webhook state
+  const [webhookInfo, setWebhookInfo] = useState(null);
+  const [webhookSecret, setWebhookSecret] = useState(null); // exibido apenas após geração
+  const [generatingWebhook, setGeneratingWebhook] = useState(false);
+  // Per-agent MCP credentials state
+  const [mcpCredsInfo, setMcpCredsInfo] = useState(null); // {configured, apiUrl, userToken, wabaId}
+  const [showMcpCredsForm, setShowMcpCredsForm] = useState(false);
+  const [mcpCredsForm, setMcpCredsForm] = useState({ apiUrl: "", userToken: "", wabaId: "" });
+  const [savingMcpCreds, setSavingMcpCreds] = useState(false);
+
+  // Bug Fix #5 — Zoom/Pan: controles de zoom e pan no canvas via CSS transform
+  const [zoom, setZoom] = useState(1.0);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const panStartRef = useRef(null);
+
+  const ZOOM_MIN = 0.3;
+  const ZOOM_MAX = 2.0;
+
+  const handleZoomIn = () => setZoom(z => Math.min(ZOOM_MAX, Math.round((z + 0.1) * 10) / 10));
+  const handleZoomOut = () => setZoom(z => Math.max(ZOOM_MIN, Math.round((z - 0.1) * 10) / 10));
+  const handleZoomReset = () => { setZoom(1.0); setPan({ x: 0, y: 0 }); };
+
+  // Wheel zoom no canvas
+  const handleWheel = useCallback((e) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+    setZoom(z => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round((z + delta) * 10) / 10)));
+  }, [ZOOM_MAX, ZOOM_MIN]);
+
+  // Middle-click pan
+  const handleCanvasMouseDown = useCallback((e) => {
+    if (e.button === 1 || (e.button === 0 && e.altKey)) {
+      e.preventDefault();
+      setIsPanning(true);
+      panStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
+    }
+  }, [pan]);
+
+  const handleCanvasMouseMove = useCallback((e) => {
+    if (isPanning && panStartRef.current) {
+      setPan({ x: e.clientX - panStartRef.current.x, y: e.clientY - panStartRef.current.y });
+    }
+  }, [isPanning]);
+
+  const handleCanvasMouseUp = useCallback((e) => {
+    if (e.button === 1 || isPanning) setIsPanning(false);
+  }, [isPanning]);
 
   useEffect(() => {
     if (!isNew) {
@@ -500,6 +564,14 @@ export default function AgentBuilder() {
           setLlmConfig(a.llm_config || {});
         })
         .finally(() => setLoading(false));
+      // Carrega info de webhook (sem exibir o secret)
+      axios.get(`${API}/agents/${agentId}/webhook-info`, { withCredentials: true })
+        .then(r => setWebhookInfo(r.data))
+        .catch(() => {});
+      // Carrega credenciais MCP por agente (campos sensíveis mascarados)
+      axios.get(`${API}/agents/${agentId}/mcp-credentials`, { withCredentials: true })
+        .then(r => { setMcpCredsInfo(r.data); if (r.data.configured) setMcpCredsForm({ apiUrl: r.data.apiUrl || "", userToken: "", wabaId: r.data.wabaId || "" }); })
+        .catch(() => {});
     } else {
       const defaultNodes = [
         { node_id: "trigger_1", type: "trigger", position: { x: 140, y: 240 }, config: { label: "Iniciar" } },
@@ -517,27 +589,37 @@ export default function AgentBuilder() {
   }, [agentId, isNew]);
 
   const handleDragStart = useCallback((e, nodeId) => {
+    if (isPanning) return;
     const node = nodes.find(n => n.node_id === nodeId);
     if (!node) return;
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
     setDraggingId(nodeId);
+    // Ajusta offset pelo zoom e pan do canvas
     setDragOffset({
-      x: (e.clientX - rect.left) - node.position.x,
-      y: (e.clientY - rect.top)  - node.position.y,
+      x: (e.clientX - rect.left - pan.x) / zoom - node.position.x,
+      y: (e.clientY - rect.top  - pan.y) / zoom - node.position.y,
     });
-  }, [nodes]);
+  }, [nodes, zoom, pan, isPanning]);
 
   const handleMouseMove = useCallback((e) => {
+    if (isPanning && panStartRef.current) {
+      setPan({ x: e.clientX - panStartRef.current.x, y: e.clientY - panStartRef.current.y });
+      return;
+    }
     if (!draggingId) return;
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const x = e.clientX - rect.left - dragOffset.x;
-    const y = e.clientY - rect.top  - dragOffset.y;
+    // Converte posição do mouse para coordenadas do canvas (considerando zoom e pan)
+    const x = (e.clientX - rect.left - pan.x) / zoom - dragOffset.x;
+    const y = (e.clientY - rect.top  - pan.y) / zoom - dragOffset.y;
     setNodes(ns => ns.map(n => n.node_id === draggingId ? { ...n, position: { x: Math.max(NODE_WIDTH / 2, x), y: Math.max(NODE_HEIGHT / 2, y) } } : n));
-  }, [draggingId, dragOffset]);
+  }, [draggingId, dragOffset, zoom, pan, isPanning]);
 
-  const handleMouseUp = useCallback(() => setDraggingId(null), []);
+  const handleMouseUp = useCallback((e) => {
+    setDraggingId(null);
+    setIsPanning(false);
+  }, []);
 
   const applyTemplate = useCallback((template) => {
     setNodes(template.nodes);
@@ -573,6 +655,14 @@ export default function AgentBuilder() {
   };
 
   const handleSave = async () => {
+    // Bug Fix #5 — Valida nós obrigatórios antes de salvar
+    const errors = validateAgent(agentName, nodes, llmConfig);
+    if (errors.length > 0) {
+      setValidationErrors(errors);
+      setTimeout(() => setValidationErrors([]), 5000);
+      return;
+    }
+    setValidationErrors([]);
     setSaving(true);
     try {
       const payload = { name: agentName, nodes, edges, llm_config: llmConfig };
@@ -605,6 +695,15 @@ export default function AgentBuilder() {
     <Layout>
       <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 80px)", animation: "fadeIn 0.3s ease-out" }}>
         {/* Top bar */}
+        {/* Erros de validação — Bug Fix #5 */}
+        {validationErrors.length > 0 && (
+          <div style={{ marginBottom: 8, background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, padding: "10px 14px", display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#EF4444", marginBottom: 2 }}>Corrija antes de salvar:</div>
+            {validationErrors.map((err, i) => (
+              <div key={i} style={{ fontSize: 12, color: "#F87171" }}>• {err}</div>
+            ))}
+          </div>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
           <button onClick={() => navigate("/agents")} style={{ background: "none", border: "none", color: "#737373", cursor: "pointer", display: "flex", alignItems: "center", gap: 5, fontSize: 13 }}>
             <ArrowLeft size={16} /> Voltar
@@ -680,6 +779,163 @@ export default function AgentBuilder() {
               </button>
             </div>
 
+            {/* Webhook section — apenas para agentes já salvos */}
+            {agent && (
+              <div style={{ padding: "8px 8px 0", borderTop: "1px solid #27272A", marginTop: 6 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#737373", textTransform: "uppercase", letterSpacing: "0.1em", padding: "0 2px 6px" }}>Webhook</div>
+                {webhookSecret ? (
+                  // Secret acabou de ser gerado — mostrar e alertar para copiar
+                  <div style={{ background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.25)", borderRadius: 8, padding: "8px 10px" }}>
+                    <div style={{ fontSize: 10, color: "#10B981", marginBottom: 4, fontWeight: 600 }}>✅ Secret gerado — copie agora!</div>
+                    <div style={{ fontSize: 9, fontFamily: "monospace", color: "#A3A3A3", wordBreak: "break-all", background: "#0A0A0A", padding: "4px 6px", borderRadius: 4, marginBottom: 6 }}>
+                      {webhookSecret}
+                    </div>
+                    <div style={{ fontSize: 9, color: "#737373", marginBottom: 6 }}>URL: /api/webhook/{agent.agent_id}</div>
+                    <button
+                      onClick={() => { navigator.clipboard?.writeText(webhookSecret); setWebhookSecret(null); }}
+                      style={{ width: "100%", padding: "5px", background: "rgba(16,185,129,0.15)", border: "1px solid rgba(16,185,129,0.3)", borderRadius: 6, color: "#10B981", fontSize: 10, cursor: "pointer", fontWeight: 600 }}
+                    >Copiar e fechar</button>
+                  </div>
+                ) : webhookInfo?.has_webhook ? (
+                  // Webhook já configurado
+                  <div style={{ background: "#2A2A2A", border: "1px solid #27272A", borderRadius: 8, padding: "8px 10px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}>
+                      <div style={{ width: 6, height: 6, background: "#10B981", borderRadius: "50%" }} />
+                      <span style={{ fontSize: 10, color: "#10B981", fontWeight: 600 }}>Webhook ativo</span>
+                    </div>
+                    <div style={{ fontSize: 9, color: "#737373", marginBottom: 6, wordBreak: "break-all" }}>
+                      /api/webhook/{agent.agent_id}
+                    </div>
+                    <button
+                      onClick={async () => {
+                        setGeneratingWebhook(true);
+                        try {
+                          const { data } = await axios.post(`${API}/agents/${agent.agent_id}/webhook-secret`, {}, { withCredentials: true });
+                          setWebhookSecret(data.webhook_secret);
+                          setWebhookInfo(i => ({ ...i, has_webhook: true }));
+                        } catch (e) { alert(e.response?.data?.detail || "Erro ao rotacionar"); }
+                        setGeneratingWebhook(false);
+                      }}
+                      disabled={generatingWebhook}
+                      style={{ width: "100%", padding: "5px", background: "transparent", border: "1px solid #27272A", borderRadius: 6, color: "#737373", fontSize: 10, cursor: "pointer" }}
+                    >{generatingWebhook ? "..." : "Rotacionar secret"}</button>
+                  </div>
+                ) : (
+                  // Sem webhook ainda
+                  <button
+                    onClick={async () => {
+                      setGeneratingWebhook(true);
+                      try {
+                        const { data } = await axios.post(`${API}/agents/${agent.agent_id}/webhook-secret`, {}, { withCredentials: true });
+                        setWebhookSecret(data.webhook_secret);
+                        setWebhookInfo({ has_webhook: true, webhook_url: data.webhook_url });
+                      } catch (e) { alert(e.response?.data?.detail || "Erro ao gerar webhook"); }
+                      setGeneratingWebhook(false);
+                    }}
+                    disabled={generatingWebhook}
+                    style={{ width: "100%", display: "flex", alignItems: "center", gap: 6, padding: "8px 10px", background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.2)", borderRadius: 8, cursor: "pointer", color: "#3B82F6", fontSize: 11, fontFamily: "IBM Plex Sans, sans-serif", transition: "all 0.2s" }}
+                  >
+                    <Zap size={12} />
+                    <span style={{ fontWeight: 600 }}>{generatingWebhook ? "Gerando..." : "Gerar Webhook URL"}</span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Per-agent MCP credentials — apenas para agentes já salvos */}
+            {agent && (
+              <div style={{ padding: "8px 8px 0", borderTop: "1px solid #27272A", marginTop: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 2px 6px" }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#737373", textTransform: "uppercase", letterSpacing: "0.1em" }}>Credenciais MCP</div>
+                  {mcpCredsInfo?.configured && !showMcpCredsForm && (
+                    <button onClick={() => setShowMcpCredsForm(true)} style={{ fontSize: 9, color: "#F97316", background: "none", border: "none", cursor: "pointer", textDecoration: "underline", padding: 0 }}>editar</button>
+                  )}
+                </div>
+                {showMcpCredsForm ? (
+                  <div style={{ background: "#0A0A0A", border: "1px solid #27272A", borderRadius: 8, padding: "8px 10px" }}>
+                    <div style={{ fontSize: 9, color: "#737373", marginBottom: 6, lineHeight: 1.4 }}>
+                      Credenciais específicas para este agente. Sobrepõe as credenciais do workspace.
+                    </div>
+                    {[
+                      { key: "apiUrl", label: "API URL", placeholder: "https://seu-crm.clickmassa.com.br", type: "text" },
+                      { key: "userToken", label: "User Token", placeholder: mcpCredsInfo?.configured ? "••••••• (deixe em branco para manter)" : "token_aqui", type: "password" },
+                      { key: "wabaId", label: "WABA ID (opcional)", placeholder: "id do número WhatsApp", type: "text" },
+                    ].map(({ key, label, placeholder, type }) => (
+                      <div key={key} style={{ marginBottom: 6 }}>
+                        <label style={{ display: "block", fontSize: 9, color: "#A3A3A3", marginBottom: 2, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</label>
+                        <input
+                          type={type}
+                          value={mcpCredsForm[key] || ""}
+                          onChange={e => setMcpCredsForm(f => ({ ...f, [key]: e.target.value }))}
+                          placeholder={placeholder}
+                          style={{ width: "100%", padding: "4px 6px", background: "#1A1A1A", border: "1px solid #27272A", borderRadius: 5, color: "white", fontSize: 10, fontFamily: "IBM Plex Mono, monospace", outline: "none", boxSizing: "border-box" }}
+                          onFocus={e => e.target.style.borderColor = "#F97316"}
+                          onBlur={e => e.target.style.borderColor = "#27272A"}
+                        />
+                      </div>
+                    ))}
+                    <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
+                      <button
+                        onClick={async () => {
+                          setSavingMcpCreds(true);
+                          try {
+                            await axios.put(`${API}/agents/${agent.agent_id}/mcp-credentials`, mcpCredsForm, { withCredentials: true });
+                            const r = await axios.get(`${API}/agents/${agent.agent_id}/mcp-credentials`, { withCredentials: true });
+                            setMcpCredsInfo(r.data);
+                            setShowMcpCredsForm(false);
+                          } catch (e) { alert(e.response?.data?.detail || "Erro ao salvar credenciais"); }
+                          setSavingMcpCreds(false);
+                        }}
+                        disabled={savingMcpCreds || !mcpCredsForm.apiUrl}
+                        style={{ flex: 1, padding: "5px", background: "rgba(249,115,22,0.15)", border: "1px solid rgba(249,115,22,0.3)", borderRadius: 6, color: "#F97316", fontSize: 10, cursor: savingMcpCreds ? "wait" : "pointer", fontWeight: 600 }}
+                      >{savingMcpCreds ? "Salvando..." : "Salvar"}</button>
+                      <button
+                        onClick={() => setShowMcpCredsForm(false)}
+                        style={{ padding: "5px 8px", background: "transparent", border: "1px solid #27272A", borderRadius: 6, color: "#737373", fontSize: 10, cursor: "pointer" }}
+                      >Cancelar</button>
+                    </div>
+                    {mcpCredsInfo?.configured && (
+                      <button
+                        onClick={async () => {
+                          if (!window.confirm("Remover credenciais MCP específicas deste agente?")) return;
+                          try {
+                            await axios.delete(`${API}/agents/${agent.agent_id}/mcp-credentials`, { withCredentials: true });
+                            setMcpCredsInfo({ configured: false });
+                            setMcpCredsForm({ apiUrl: "", userToken: "", wabaId: "" });
+                            setShowMcpCredsForm(false);
+                          } catch (e) { alert(e.response?.data?.detail || "Erro ao remover"); }
+                        }}
+                        style={{ width: "100%", marginTop: 4, padding: "4px", background: "transparent", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 6, color: "rgba(239,68,68,0.6)", fontSize: 9, cursor: "pointer" }}
+                      >Remover credenciais</button>
+                    )}
+                  </div>
+                ) : mcpCredsInfo?.configured ? (
+                  <div style={{ background: "#2A2A2A", border: "1px solid #27272A", borderRadius: 8, padding: "8px 10px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}>
+                      <div style={{ width: 6, height: 6, background: "#10B981", borderRadius: "50%" }} />
+                      <span style={{ fontSize: 10, color: "#10B981", fontWeight: 600 }}>Credenciais configuradas</span>
+                    </div>
+                    <div style={{ fontSize: 9, color: "#737373", wordBreak: "break-all", lineHeight: 1.4 }}>
+                      {mcpCredsInfo.apiUrl || "URL não definida"}
+                    </div>
+                    {mcpCredsInfo.updated_at && (
+                      <div style={{ fontSize: 9, color: "#404040", marginTop: 2 }}>
+                        Atualizado: {new Date(mcpCredsInfo.updated_at).toLocaleDateString("pt-BR")}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setShowMcpCredsForm(true)}
+                    style={{ width: "100%", display: "flex", alignItems: "center", gap: 6, padding: "8px 10px", background: "rgba(16,185,129,0.06)", border: "1px solid rgba(16,185,129,0.2)", borderRadius: 8, cursor: "pointer", color: "#10B981", fontSize: 11, fontFamily: "IBM Plex Sans, sans-serif", transition: "all 0.2s" }}
+                  >
+                    <Database size={12} />
+                    <span style={{ fontWeight: 600 }}>Configurar credenciais CRM</span>
+                  </button>
+                )}
+              </div>
+            )}
+
             <div style={{ padding: "10px 14px", borderTop: "1px solid #27272A", marginTop: "auto" }}>
               <div style={{ fontSize: 10, color: "#737373", lineHeight: 1.5 }}>
                 Clique para adicionar.<br />Arraste para mover.
@@ -687,31 +943,61 @@ export default function AgentBuilder() {
             </div>
           </div>
 
-          {/* Canvas */}
+          {/* Canvas — Bug Fix #5: zoom/pan com CSS transform */}
           <div
             ref={canvasRef}
             className="canvas-bg"
-            style={{ flex: 1, position: "relative", overflow: "hidden", cursor: draggingId ? "grabbing" : "default" }}
+            style={{ flex: 1, position: "relative", overflow: "hidden", cursor: isPanning ? "grabbing" : draggingId ? "grabbing" : "default" }}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
             onMouseLeave={handleMouseUp}
-            onClick={() => setSelectedNode(null)}
+            onMouseDown={handleCanvasMouseDown}
+            onWheel={handleWheel}
+            onClick={() => { if (!isPanning) setSelectedNode(null); }}
           >
-            <EdgeSVG nodes={nodes} edges={edges} />
-            {nodes.map(node => (
-              <NodeComponent
-                key={node.node_id}
-                node={node}
-                selected={selectedNode?.node_id === node.node_id}
-                onSelect={setSelectedNode}
-                onDragStart={handleDragStart}
-                onDelete={deleteNode}
-              />
-            ))}
+            {/* Camada transformada pelo zoom/pan */}
+            <div style={{
+              position: "absolute",
+              inset: 0,
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transformOrigin: "0 0",
+            }}>
+              <EdgeSVG nodes={nodes} edges={edges} />
+              {nodes.map(node => (
+                <NodeComponent
+                  key={node.node_id}
+                  node={node}
+                  selected={selectedNode?.node_id === node.node_id}
+                  onSelect={setSelectedNode}
+                  onDragStart={handleDragStart}
+                  onDelete={deleteNode}
+                />
+              ))}
+            </div>
+
+            {/* Controles de Zoom — posicionados fixo no canto do canvas */}
+            <div style={{ position: "absolute", bottom: 14, right: 14, display: "flex", alignItems: "center", gap: 6, zIndex: 20 }}>
+              <button
+                onClick={handleZoomOut}
+                title="Reduzir zoom (Ctrl + scroll)"
+                style={{ width: 28, height: 28, background: "#1A1A1A", border: "1px solid #27272A", borderRadius: 6, color: "#A3A3A3", cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}
+              >−</button>
+              <button
+                onClick={handleZoomReset}
+                title="Resetar zoom e posição"
+                style={{ padding: "4px 8px", background: "#1A1A1A", border: "1px solid #27272A", borderRadius: 6, color: "#A3A3A3", cursor: "pointer", fontSize: 11, fontFamily: "IBM Plex Mono, monospace" }}
+              >{Math.round(zoom * 100)}%</button>
+              <button
+                onClick={handleZoomIn}
+                title="Aumentar zoom (Ctrl + scroll)"
+                style={{ width: 28, height: 28, background: "#1A1A1A", border: "1px solid #27272A", borderRadius: 6, color: "#A3A3A3", cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}
+              >+</button>
+              <span style={{ fontSize: 10, color: "#404040", marginLeft: 4 }}>Alt+drag para pan</span>
+            </div>
 
             {/* Hint */}
             {nodes.length <= 3 && (
-              <div style={{ position: "absolute", bottom: 16, left: "50%", transform: "translateX(-50%)", background: "rgba(249,115,22,0.1)", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 8, padding: "6px 14px", fontSize: 12, color: "#F97316", pointerEvents: "none", whiteSpace: "nowrap" }}>
+              <div style={{ position: "absolute", bottom: 50, left: "50%", transform: "translateX(-50%)", background: "rgba(249,115,22,0.1)", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 8, padding: "6px 14px", fontSize: 12, color: "#F97316", pointerEvents: "none", whiteSpace: "nowrap" }}>
                 Adicione ferramentas na barra esquerda e clique nos nós para configurar
               </div>
             )}

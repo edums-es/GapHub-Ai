@@ -8,16 +8,21 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  const fetchCurrentUser = useCallback(async () => {
+    const { data } = await axios.get(`${API}/auth/me`, { withCredentials: true });
+    setUser(data);
+    return data;
+  }, []);
+
   const checkAuth = useCallback(async () => {
     try {
-      const { data } = await axios.get(`${API}/auth/me`, { withCredentials: true });
-      setUser(data);
+      await fetchCurrentUser();
     } catch {
       setUser(false);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchCurrentUser]);
 
   useEffect(() => {
     // CRITICAL: If returning from OAuth callback, skip the /me check.
@@ -30,15 +35,13 @@ export function AuthProvider({ children }) {
   }, [checkAuth]);
 
   const login = async (email, password) => {
-    const { data } = await axios.post(`${API}/auth/login`, { email, password }, { withCredentials: true });
-    setUser(data);
-    return data;
+    await axios.post(`${API}/auth/login`, { email, password }, { withCredentials: true });
+    return fetchCurrentUser();
   };
 
   const register = async (name, email, password) => {
-    const { data } = await axios.post(`${API}/auth/register`, { name, email, password }, { withCredentials: true });
-    setUser(data);
-    return data;
+    await axios.post(`${API}/auth/register`, { name, email, password }, { withCredentials: true });
+    return fetchCurrentUser();
   };
 
   const logout = async () => {

@@ -1,0 +1,110 @@
+version: "3.8"
+
+# GapHub AI — Stack completa de desenvolvimento e produção
+# Serviços: MongoDB + Mongo Express (UI) + Backend FastAPI + Frontend Nginx
+#
+# Uso em desenvolvimento:
+#   docker compose up -d
+#
+# Uso em produção (sem Mongo Express):
+#   docker compose --profile prod up -d
+#
+# Prerequisito: criar arquivo .env na raiz (copie de .env.example)
+
+services:
+  # ── MongoDB ──────────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7.0
+    container_name: gaphub-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: ${DB_NAME:-gaphub_ai}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-gaphub}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-gaphub_secret}
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - gaphub-net
+
+  # ── Mongo Express (UI Visual) ─────────────────────────────────────────────
+  # Disponível em http://localhost:8081 — apenas para desenvolvimento
+  mongo-express:
+    image: mongo-express:latest
+    container_name: gaphub-mongo-express
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: ${MONGO_USER:-gaphub}
+      ME_CONFIG_MONGODB_ADMINPASSWORD: ${MONGO_PASSWORD:-gaphub_secret}
+      ME_CONFIG_MONGODB_URL: mongodb://${MONGO_USER:-gaphub}:${MONGO_PASSWORD:-gaphub_secret}@mongodb:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: ${MONGO_EXPRESS_USER:-admin}
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWORD:-admin123}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    profiles:
+      - dev
+    networks:
+      - gaphub-net
+
+  # ── Backend FastAPI ───────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gaphub-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      MONGO_URL: mongodb://${MONGO_USER:-gaphub}:${MONGO_PASSWORD:-gaphub_secret}@mongodb:27017/${DB_NAME:-gaphub_ai}?authSource=admin
+      DB_NAME: ${DB_NAME:-gaphub_ai}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    networks:
+      - gaphub-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ── Frontend Nginx ────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_BACKEND_URL: ${FRONTEND_BACKEND_URL:-http://localhost:8000}
+    container_name: gaphub-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - gaphub-net
+
+volumes:
+  mongo_data:
+    driver: local
+
+networks:
+  gaphub-net:
+    driver: bridge

@@ -16,6 +16,7 @@ from agents import agents_router
 from marketplace import marketplace_router
 from admin import admin_router
 from scheduler import scheduler_router, init_scheduler, stop_scheduler
+from db.init import create_indexes as _create_indexes_full, seed_marketplace_templates
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -24,6 +25,12 @@ MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
+allowed_origins = {
+    FRONTEND_URL,
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+}
+
 mongo_client = AsyncIOMotorClient(MONGO_URL)
 db = mongo_client[DB_NAME]
 
@@ -31,8 +38,10 @@ db = mongo_client[DB_NAME]
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.db = db
-    await create_indexes(db)
+    # Usa init.py completo com todos os índices e TTL
+    await _create_indexes_full(db)
     await seed_admin(db)
+    await seed_marketplace_templates(db)  # Insere os 6 templates padrão se ausentes
     await init_scheduler(db)
     logger.info("GapHub AI backend started")
     yield
@@ -40,22 +49,11 @@ async def lifespan(app: FastAPI):
     mongo_client.close()
 
 
-async def create_indexes(db):
-    await db.users.create_index("email", unique=True)
-    await db.user_sessions.create_index("session_token")
-    await db.login_attempts.create_index("identifier")
-    await db.agents.create_index([("workspace_id", 1), ("created_at", -1)])
-    await db.credentials.create_index([("workspace_id", 1), ("mcp_id", 1)])
-    await db.runs.create_index([("agent_id", 1), ("started_at", -1)])
-    await db.schedules.create_index([("workspace_id", 1), ("created_at", -1)])
-    await db.schedules.create_index("active")
-
-
 app = FastAPI(title="GapHub AI", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:3000"],
+    allow_origins=list(allowed_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

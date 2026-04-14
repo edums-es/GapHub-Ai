@@ -180,6 +180,47 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {/* Per-Agent Metrics Table */}
+        {stats?.agent_metrics?.length > 0 && (
+          <div style={{ marginTop: 20, background: "#1A1A1A", border: "1px solid #27272A", borderRadius: 12, padding: 20 }}>
+            <h3 style={{ fontFamily: "Outfit, sans-serif", fontWeight: 700, fontSize: 16, color: "white", marginBottom: 16 }}>Métricas por Agente</h3>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid #27272A" }}>
+                    {["Agente", "Status", "Total Runs", "Concluídas", "Falhas", "Taxa Sucesso", "Último Run"].map(h => (
+                      <th key={h} style={{ textAlign: "left", fontSize: 11, color: "#737373", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", padding: "8px 12px" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {stats.agent_metrics.map(m => (
+                    <tr key={m.agent_id} style={{ borderBottom: "1px solid #1F1F1F", transition: "background 0.15s" }}
+                      onMouseEnter={e => e.currentTarget.style.background = "#2A2A2A"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                    >
+                      <td style={{ padding: "10px 12px", fontSize: 13, fontWeight: 600, color: "white" }}>{m.name}</td>
+                      <td style={{ padding: "10px 12px" }}><StatusBadge status={m.status} /></td>
+                      <td style={{ padding: "10px 12px", fontSize: 13, color: "#A3A3A3" }}>{m.total_runs}</td>
+                      <td style={{ padding: "10px 12px", fontSize: 13, color: "#10B981" }}>{m.completed_runs}</td>
+                      <td style={{ padding: "10px 12px", fontSize: 13, color: m.failed_runs > 0 ? "#EF4444" : "#737373" }}>{m.failed_runs}</td>
+                      <td style={{ padding: "10px 12px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <div style={{ flex: 1, height: 4, background: "#2A2A2A", borderRadius: 2, minWidth: 60 }}>
+                            <div style={{ height: "100%", width: `${m.success_rate}%`, background: m.success_rate >= 80 ? "#10B981" : m.success_rate >= 50 ? "#F59E0B" : "#EF4444", borderRadius: 2 }} />
+                          </div>
+                          <span style={{ fontSize: 12, color: "#A3A3A3", whiteSpace: "nowrap" }}>{m.success_rate}%</span>
+                        </div>
+                      </td>
+                      <td style={{ padding: "10px 12px", fontSize: 12, color: "#737373" }}>{m.last_run ? relativeTime(m.last_run) : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         {/* Quick actions */}
         <div style={{ marginTop: 20, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
           {[

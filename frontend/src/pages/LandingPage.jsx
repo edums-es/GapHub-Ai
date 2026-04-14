@@ -21,11 +21,6 @@ export default function LandingPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-  const handleGoogleLogin = () => {
-    const redirectUrl = window.location.origin + "/dashboard";
-    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
-  };
 
   return (
     <div style={{ minHeight: "100vh", background: "#0A0A0A", fontFamily: "IBM Plex Sans, sans-serif" }}>
@@ -88,13 +83,13 @@ export default function LandingPage() {
               Criar meu agente <ArrowRight size={18} />
             </button>
             <button
-              onClick={handleGoogleLogin}
-              data-testid="hero-google-btn"
+              onClick={() => navigate("/login")}
+              data-testid="hero-login-btn"
               style={{ display: "flex", alignItems: "center", gap: 8, padding: "14px 28px", background: "transparent", color: "white", border: "1px solid #27272A", borderRadius: 10, fontFamily: "Outfit, sans-serif", fontWeight: 600, fontSize: 15, cursor: "pointer", transition: "all 0.2s" }}
               onMouseEnter={e => { e.currentTarget.style.borderColor = "#F97316"; e.currentTarget.style.color = "#F97316"; }}
               onMouseLeave={e => { e.currentTarget.style.borderColor = "#27272A"; e.currentTarget.style.color = "white"; }}
             >
-              Entrar com Google
+              Já tenho conta
             </button>
           </div>
 

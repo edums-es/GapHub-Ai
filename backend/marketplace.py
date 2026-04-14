@@ -1,4 +1,17 @@
-from fastapi import APIRouter
+"""
+marketplace.py — Bug Fix #3: Marketplace migrado para MongoDB.
+
+O MCP_CATALOG Python permanece como "catálogo base" de fallback e fonte de verdade
+para instalações iniciais. Novos templates podem ser criados via API e ficam na
+coleção `marketplace_templates` do MongoDB — sem necessidade de redeploy.
+
+Prioridade de consulta: MongoDB > MCP_CATALOG Python (fallback).
+"""
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 marketplace_router = APIRouter(prefix="/api/marketplace")
 
@@ -212,20 +225,137 @@ CATEGORIES = [
 ]
 
 
+# ── Pydantic models para CRUD de templates no MongoDB ────────────────────────
+
+class TemplateCreate(BaseModel):
+    id: str
+    name: str
+    description: str
+    category: str
+    icon: Optional[str] = "zap"
+    color: Optional[str] = "#F97316"
+    status: Optional[str] = "active"
+    version: Optional[str] = "1.0"
+    author: Optional[str] = "GapHub"
+    credentials_required: Optional[list] = []
+    tools: Optional[list] = []
+
+
+class TemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    status: Optional[str] = None
+    tools: Optional[list] = None
+    active: Optional[bool] = None
+
+
+async def _get_db(request: Request):
+    return request.app.state.db
+
+
+async def _load_all_templates(db) -> list:
+    """
+    Combina MCP_CATALOG (Python) com templates do MongoDB.
+    Templates do MongoDB com mesmo id sobrescrevem o catálogo base (override).
+    Isso permite atualizar integrações sem redeploy.
+    """
+    # Base: catálogo Python
+    catalog = {m["id"]: dict(m) for m in MCP_CATALOG}
+
+    # Overlay: templates do MongoDB (novos ou overrides)
+    try:
+        db_templates = await db.marketplace_templates.find(
+            {}, {"_id": 0}
+        ).to_list(500)
+        for tmpl in db_templates:
+            catalog[tmpl["id"]] = tmpl
+    except Exception:
+        pass  # MongoDB indisponível — usa só catálogo Python
+
+    return list(catalog.values())
+
+
+# ── Endpoints de leitura ─────────────────────────────────────────────────────
+
 @marketplace_router.get("")
-async def list_mcps(category: str = "all", search: str = ""):
-    items = MCP_CATALOG
+async def list_mcps(request: Request, category: str = "all", search: str = ""):
+    db = await _get_db(request)
+    items = await _load_all_templates(db)
     if category != "all":
-        items = [m for m in items if m["category"] == category]
+        items = [m for m in items if m.get("category") == category]
     if search:
         s = search.lower()
-        items = [m for m in items if s in m["name"].lower() or s in m["description"].lower()]
+        items = [m for m in items if s in m.get("name", "").lower() or s in m.get("description", "").lower()]
     return {"mcps": items, "categories": CATEGORIES, "total": len(items)}
 
 
+@marketplace_router.get("/templates")
+async def list_templates(request: Request, category: str = "all"):
+    """Lista apenas templates armazenados no MongoDB (excluindo catálogo Python base)."""
+    db = await _get_db(request)
+    query = {} if category == "all" else {"category": category}
+    templates = await db.marketplace_templates.find(query, {"_id": 0}).to_list(500)
+    return {"templates": templates, "total": len(templates)}
+
+
 @marketplace_router.get("/{mcp_id}")
-async def get_mcp(mcp_id: str):
+async def get_mcp(request: Request, mcp_id: str):
+    db = await _get_db(request)
+    # Tenta MongoDB primeiro
+    try:
+        tmpl = await db.marketplace_templates.find_one({"id": mcp_id}, {"_id": 0})
+        if tmpl:
+            return tmpl
+    except Exception:
+        pass
+    # Fallback: catálogo Python
     mcp = next((m for m in MCP_CATALOG if m["id"] == mcp_id), None)
     if not mcp:
         raise HTTPException(status_code=404, detail="MCP não encontrado")
     return mcp
+
+
+# ── Endpoints de escrita (CRUD) ───────────────────────────────────────────────
+
+@marketplace_router.post("/templates")
+async def create_template(request: Request, body: TemplateCreate):
+    """Cria novo template de agente/integração no MongoDB — sem redeploy."""
+    db = await _get_db(request)
+    existing = await db.marketplace_templates.find_one({"id": body.id})
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Template com id '{body.id}' já existe. Use PUT para atualizar.")
+    doc = body.model_dump()
+    doc["active"] = True
+    doc["installs"] = 0
+    doc["rating"] = 0
+    doc["created_at"] = datetime.now(timezone.utc)
+    doc["updated_at"] = datetime.now(timezone.utc)
+    await db.marketplace_templates.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@marketplace_router.put("/templates/{mcp_id}")
+async def update_template(request: Request, mcp_id: str, body: TemplateUpdate):
+    """Atualiza template existente no MongoDB."""
+    db = await _get_db(request)
+    update = {k: v for k, v in body.model_dump().items() if v is not None}
+    update["updated_at"] = datetime.now(timezone.utc)
+    result = await db.marketplace_templates.update_one(
+        {"id": mcp_id}, {"$set": update}, upsert=False
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Template não encontrado no banco. Use POST para criar.")
+    tmpl = await db.marketplace_templates.find_one({"id": mcp_id}, {"_id": 0})
+    return tmpl
+
+
+@marketplace_router.delete("/templates/{mcp_id}")
+async def delete_template(request: Request, mcp_id: str):
+    """Remove template do MongoDB (não afeta catálogo Python base)."""
+    db = await _get_db(request)
+    result = await db.marketplace_templates.delete_one({"id": mcp_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Template não encontrado no banco.")
+    return {"message": f"Template '{mcp_id}' removido com sucesso."}

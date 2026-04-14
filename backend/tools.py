@@ -1,12 +1,60 @@
 import httpx
 import asyncio
 import logging
+import time
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
-# Cache de tokens de sessão por workspace
-_session_cache: Dict[str, str] = {}
+
+# ── Bug Fix #2: TTLCache para tokens de sessão — evita vazamento de memória ──
+# Substituímos o dict global ilimitado por um cache com expiração (TTL) de 30min.
+
+class _TTLCache:
+    """
+    Cache simples com TTL (Time-To-Live). Thread-safe para uso assíncrono de
+    thread única (asyncio). Não requer dependência externa (cachetools).
+    """
+    def __init__(self, ttl_seconds: int = 1800):
+        self._store: Dict[str, tuple] = {}  # key -> (value, expires_at)
+        self._ttl = ttl_seconds
+
+    def _evict_expired(self):
+        now = time.monotonic()
+        expired = [k for k, (_, exp) in self._store.items() if now > exp]
+        for k in expired:
+            del self._store[k]
+
+    def __contains__(self, key: str) -> bool:
+        if key in self._store:
+            _, exp = self._store[key]
+            if time.monotonic() < exp:
+                return True
+            del self._store[key]
+        return False
+
+    def __getitem__(self, key: str) -> str:
+        if key in self:
+            return self._store[key][0]
+        raise KeyError(key)
+
+    def __setitem__(self, key: str, value: str):
+        self._evict_expired()
+        self._store[key] = (value, time.monotonic() + self._ttl)
+
+    def pop(self, key: str, default=None):
+        if key in self._store:
+            val, _ = self._store.pop(key)
+            return val
+        return default
+
+    def __len__(self):
+        self._evict_expired()
+        return len(self._store)
+
+
+# Cache de tokens de sessão por workspace — TTL de 30 minutos
+_session_cache: _TTLCache = _TTLCache(ttl_seconds=1800)
 
 
 async def get_clickmassa_token(credentials: dict) -> str:
@@ -45,29 +93,55 @@ async def get_clickmassa_token(credentials: dict) -> str:
 
 
 def _format_messages_with_direction(messages_raw: list) -> list:
-    """Format message list with clear direction labels."""
+    """
+    Formata mensagens com prefixo de texto explícito que o LLM lê diretamente,
+    sem depender de interpretar campos JSON como fromMe ou direcao.
+    """
     formatted = []
     for msg in messages_raw:
         if msg.get("messageType") == "notification":
-            continue  # pula notificações de sistema
+            continue
+
         from_me = msg.get("fromMe", False)
+        is_private = msg.get("isPrivate", False)
+        body = msg.get("body", "").strip()
+
+        if not body:
+            continue
+
+        if is_private:
+            prefix = "[NOTA INTERNA]"
+        elif from_me:
+            prefix = "[EMPRESA]"
+        else:
+            prefix = "[LEAD]"
+
         formatted.append({
             "id": msg.get("id"),
-            "direcao": "ENVIADO_PELA_EMPRESA" if from_me else "RECEBIDO_DO_LEAD",
+            "texto_formatado": f"{prefix}: {body}",
+            "prefixo": prefix,
             "fromMe": from_me,
-            "texto": msg.get("body", ""),
-            "isNotaInterna": msg.get("isPrivate", False),
+            "isNotaInterna": is_private,
             "horario": msg.get("createdAt", msg.get("timestamp", "")),
         })
     return formatted
 
 
 def _annotate_ticket_last_message(ticket: dict) -> dict:
-    """Add direction label to last message in a ticket."""
+    """Add text prefix to last message in a ticket so LLM reads direction as plain text."""
     last_msg = ticket.get("lastMessage")
     if last_msg and isinstance(last_msg, dict):
         from_me = last_msg.get("fromMe", False)
-        ticket["lastMessage"]["direcao"] = "ENVIADO_PELA_EMPRESA" if from_me else "RECEBIDO_DO_LEAD"
+        is_private = last_msg.get("isPrivate", False)
+        body = last_msg.get("body", "").strip()
+        if is_private:
+            prefix = "[NOTA INTERNA]"
+        elif from_me:
+            prefix = "[EMPRESA]"
+        else:
+            prefix = "[LEAD]"
+        ticket["lastMessage"]["prefixo"] = prefix
+        ticket["lastMessage"]["texto_formatado"] = f"{prefix}: {body}" if body else ""
     return ticket
 
 
@@ -136,10 +210,13 @@ async def execute_clickmassa_tool(tool_name: str, params: dict, credentials: dic
                 data = r.json()
                 messages_raw = data.get("messages", data if isinstance(data, list) else [])
                 formatted = _format_messages_with_direction(messages_raw)
+                # Monta conversa como bloco de texto legível para o LLM
+                conversa_texto = "\n".join(m["texto_formatado"] for m in formatted)
                 return {
+                    "conversa": conversa_texto,
                     "mensagens": formatted,
                     "total": len(formatted),
-                    "instrucao": "fromMe:false=LEAD falou, fromMe:true=EMPRESA falou. NUNCA trate ENVIADO_PELA_EMPRESA como mensagem do lead.",
+                    "legenda": "[LEAD] = cliente falou | [EMPRESA] = empresa/atendente falou | [NOTA INTERNA] = só equipe vê",
                 }
             elif tool_name == "listar_tickets_pendentes":
                 return await c.get(f"{base_url}/tickets?status=pending", headers=headers)
@@ -235,7 +312,36 @@ async def execute_http_request(tool_name: str, params: dict) -> dict:
 
 
 async def execute_tool(mcp_id: str, tool_name: str, params: dict, credentials: dict) -> dict:
+    """
+    Ponto central de despacho de ferramentas.
+    Para ClickMassa: tenta primeiro via MCPClient (Railway), com fallback à API direta.
+    """
     if mcp_id == "clickmassa":
+        # Tenta via MCPClient (MCP ClickMassa no Railway) se credenciais MCP disponíveis
+        mcp_creds = {
+            "apiUrl": credentials.get("apiUrl") or credentials.get("base_url", ""),
+            "userToken": credentials.get("userToken") or credentials.get("token", ""),
+            "wabaId": credentials.get("wabaId", ""),
+        }
+        if mcp_creds["userToken"] or mcp_creds["apiUrl"]:
+            try:
+                from mcp_client import default_mcp_client
+                result = await default_mcp_client.call_tool(tool_name, params, mcp_creds)
+                # Se MCPClient retornou erro de conexão/ferramenta não encontrada, faz fallback à API direta
+                if isinstance(result, dict) and "error" in result:
+                    err_msg = str(result.get("error", ""))
+                    http_status = result.get("http_status", 0)
+                    # Fallback quando: 404 (endpoint ou ferramenta não encontrada),
+                    # erros de conectividade, ou timeout
+                    if http_status == 404 or any(kw in err_msg for kw in [
+                        "conectar", "Timeout", "ConnectError", "404",
+                        "não encontrada no MCP", "not found"
+                    ]):
+                        logger.warning(f"MCPClient falhou para {tool_name} (http_status={http_status}), usando fallback direto: {err_msg}")
+                        return await execute_clickmassa_tool(tool_name, params, credentials)
+                return result
+            except Exception as e:
+                logger.warning(f"MCPClient erro ({tool_name}): {e} — usando fallback direto")
         return await execute_clickmassa_tool(tool_name, params, credentials)
     elif mcp_id == "web_search":
         return await execute_web_search(params)
