@@ -1141,8 +1141,8 @@ async def webhook_trigger(
         user_input = (
             f"Mensagem recebida do lead via Webhook:\n"
             f"\"{user_input}\"\n\n"
-            f"MISSÃO: Responda a este lead.\n"
-            f"1. Se desejar usar ferramentas, você DEVE usar o ticket_id={metadata.get('ticket_id')} na ferramenta enviar_mensagem_direta e buscar_mensagens_ticket."
+            f"==== ATENÇÃO - MISSÃO OBRIGATÓRIA ====\n"
+            f"Você NÃO PODE apenas dizer a resposta neste chat. Para que o lead receba sua resposta no WhatsApp, você DEVE OBRIGATORIAMENTE invocar a ferramenta 'enviar_mensagem_direta' (ou equivalente de enviar mensagem) utilizando o parâmetro ticket_id={metadata.get('ticket_id')}."
         )
 
     # Cria registro de run
