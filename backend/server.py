@@ -56,7 +56,7 @@ app = FastAPI(title="GapHub AI", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(allowed_origins),
-    allow_origin_regex=r"https://gap-hub-ai.*\.vercel\.app",
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
