@@ -366,14 +366,46 @@ async def execute_tool(mcp_id: str, tool_name: str, params: dict, credentials: d
     return {"error": f"MCP '{mcp_id}' não suportado ainda"}
 
 
-def build_tool_definitions(nodes: list) -> List[dict]:
+def build_tool_definitions(nodes: list, agent: dict = None) -> List[dict]:
+    """
+    Monta as tool definitions expostas ao LLM.
+
+    Fontes, em ordem:
+      1. `nodes` — tool nodes clássicos desenhados no canvas (compat legado).
+      2. `agent.enabled_skill_packs` — packs curados que se expandem em tools.
+
+    As duas fontes coexistem: se um agente tem NODES e PACKS, a união dos dois
+    é exposta. Deduplicação por (mcp_id, tool_name).
+    """
     from marketplace import MCP_CATALOG
-    defs = []
-    for node in nodes:
+    try:
+        from skill_packs import expand_packs_to_tool_refs
+    except Exception:  # defensivo — skill_packs é opcional no carregamento
+        expand_packs_to_tool_refs = lambda _: []
+
+    # 1) Tool refs vindas dos nodes do canvas
+    refs: List[dict] = []
+    for node in nodes or []:
         if node.get("type") != "tool":
             continue
-        mcp_id = node.get("config", {}).get("mcp_id")
-        tool_name = node.get("config", {}).get("tool_name", "*")
+        cfg = node.get("config", {}) or {}
+        refs.append({"mcp_id": cfg.get("mcp_id"), "tool_name": cfg.get("tool_name", "*")})
+
+    # 2) Tool refs vindas dos skill packs habilitados no agente
+    if agent:
+        pack_ids = agent.get("enabled_skill_packs", []) or []
+        if pack_ids:
+            refs.extend(expand_packs_to_tool_refs(pack_ids))
+
+    # 3) Expansão + dedupe
+    defs: List[dict] = []
+    seen = set()
+    for ref in refs:
+        mcp_id = ref.get("mcp_id")
+        tool_name = ref.get("tool_name", "*")
+        if not mcp_id:
+            continue
+
         mcp = next((m for m in MCP_CATALOG if m["id"] == mcp_id), None)
         if not mcp:
             continue
@@ -383,6 +415,10 @@ def build_tool_definitions(nodes: list) -> List[dict]:
             tools_to_add = [t for t in tools_to_add if t["name"] == tool_name]
 
         for t in tools_to_add:
+            key = (mcp_id, t["name"])
+            if key in seen:
+                continue
+            seen.add(key)
             defs.append(_make_tool_def(mcp_id, t["name"], t["description"]))
     return defs
 

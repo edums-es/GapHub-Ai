@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import json
 import logging
@@ -17,6 +18,134 @@ from auth import get_current_user
 from tools import execute_tool, build_tool_definitions
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent runtime helpers — anti-loop, dialogue sanitization, prompt rules.
+# Shared by both execute_agent (sync) and execute_agent_streaming_queue (stream).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Regex that matches hallucinated dialogue markers the LLM sometimes emits when
+# it starts simulating the lead responding to itself. We cut the text at the
+# FIRST occurrence of any of these patterns, keeping only the genuine reply.
+_DIALOGUE_MARKER_RE = re.compile(
+    r"(?im)^\s*(?:"
+    r"\[LEAD\]|\[EMPRESA\]|\[NOTA INTERNA\]|"
+    r"Lead|Cliente|Usu[aá]rio|User|"
+    r"Agente|Atendente|Assistant|Bot|IA|AI"
+    r")\s*:"
+)
+
+
+def _sanitize_agent_text(text: Optional[str]) -> str:
+    """
+    Strip hallucinated dialogue from LLM output.
+
+    If the LLM replies with something like:
+        "Olá João!\n\nLead: Tudo bem?\nAgente: Sim!"
+    we return only "Olá João!" — everything after the first dialogue marker is
+    hallucinated self-dialogue and must not be sent to the real lead.
+    """
+    if not text:
+        return ""
+    m = _DIALOGUE_MARKER_RE.search(text)
+    if m:
+        text = text[: m.start()]
+    return text.strip()
+
+
+# Mandatory CRM behavior rules appended to every agent's system prompt.
+# Promoted to module level so both execute_agent and the streaming variant share
+# the same safety rails.
+MANDATORY_CRM_RULES = """
+
+---
+REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
+
+1. DIREÇÃO DAS MENSAGENS NOS TICKETS:
+   Ao receber mensagens do CRM, cada mensagem virá prefixada assim:
+   - [LEAD]: texto → O CLIENTE/LEAD escreveu isso. É a voz do cliente.
+   - [EMPRESA]: texto → A EMPRESA/ATENDENTE enviou isso. NÃO é o cliente falando.
+   - [NOTA INTERNA]: texto → Nota interna da equipe, invisível ao lead.
+   NUNCA confunda [EMPRESA] com mensagem do lead.
+   Sempre leia todos os prefixos antes de tirar conclusões sobre o que o lead quer.
+
+2. QUANDO ENVIAR MENSAGEM AO LEAD:
+   - Se o input começar com "[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]":
+     * Use "enviar_mensagem_direta" ou "enviar_mensagem" EXATAMENTE UMA VEZ.
+     * APÓS enviar, PARE COMPLETAMENTE. Não faça mais nenhuma chamada de ferramenta.
+     * NÃO use "buscar_mensagens_ticket" — a mensagem já está no input.
+     * NÃO simule o lead respondendo. NÃO continue a conversa sozinho.
+     * Resposta em UMA mensagem, encerrada.
+   - Em outros contextos, use "enviar_mensagem_direta" SOMENTE quando explicitamente pedido.
+   - NUNCA envie mensagens múltiplas em sequência sem o lead ter respondido entre elas.
+   - NUNCA escreva diálogos fictícios como "Lead: ...", "Cliente: ...", "Agente: ..." dentro
+     do texto da mensagem. Envie APENAS sua resposta direta, em primeira pessoa.
+
+3. QUANDO USAR NOTA INTERNA (enviar_nota_interna):
+   - Para TODA análise, qualificação, classificação, resumo, observação ou alerta de uso interno.
+   - A nota interna NÃO aparece para o lead — é visível apenas para a equipe.
+
+4. TRANSFERÊNCIA PARA HUMANO:
+   - Use "devolver_para_fila" para devolver ticket a um atendente humano.
+   - Avise ao usuário quando transferir.
+
+5. ANÁLISE DE TICKETS:
+   - Ao analisar tickets, primeiro chame "buscar_mensagens_ticket" para ver a conversa completa.
+   - Use os prefixos [LEAD], [EMPRESA], [NOTA INTERNA] para entender quem disse o quê.
+---"""
+
+
+# Tools that are blocked in webhook mode: if we already have the lead's message
+# in the payload, re-fetching ticket history just lets the agent see its own
+# prior reply and answer itself.
+WEBHOOK_BLOCKED_TOOLS = {
+    "buscar_mensagens_ticket",
+    "listar_tickets_pendentes",
+    "buscar_tickets",
+    "get_messages",
+    "list_messages",
+    # MCP-namespaced variants
+    "clickmassa__buscar_mensagens_ticket",
+    "clickmassa__listar_tickets_pendentes",
+}
+
+
+_WEBHOOK_PREFIX_RE = re.compile(
+    r"^\[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA\]\s*\n"
+    r"Mensagem recebida do lead via CRM:\s*\n\"(.*?)\"",
+    re.DOTALL,
+)
+
+
+def _extract_clean_user_input(user_input: str) -> str:
+    """Strip the webhook orchestration envelope, returning the raw lead message."""
+    if not user_input:
+        return ""
+    m = _WEBHOOK_PREFIX_RE.search(user_input)
+    if m:
+        return m.group(1).strip()
+    return user_input.strip()
+
+
+def _is_send_tool(fn_name: str) -> bool:
+    """True if the tool call sends a visible message to the lead (not an internal note)."""
+    if not fn_name:
+        return False
+    # Strip mcp_id__ prefix if present.
+    bare = fn_name.split("__", 1)[1] if "__" in fn_name else fn_name
+    # enviar_nota_interna does NOT count — it's invisible to the lead.
+    return bare.startswith("enviar_mensagem") or bare.startswith("enviar_midia")
+
+
+def _compose_skill_prompt(agent: dict) -> str:
+    """Concatena os prompt fragments dos skill packs habilitados no agente."""
+    try:
+        from skill_packs import compose_packs_prompt
+    except Exception:
+        return ""
+    pack_ids = (agent or {}).get("enabled_skill_packs", []) or []
+    return compose_packs_prompt(pack_ids)
 
 agents_router = APIRouter(prefix="/api")
 
@@ -102,6 +231,11 @@ class AgentUpdate(BaseModel):
     llm_config: Optional[dict] = None
     nodes: Optional[List[dict]] = None
     edges: Optional[List[dict]] = None
+    enabled_skill_packs: Optional[List[str]] = None
+
+
+class SkillPacksUpdate(BaseModel):
+    enabled_skill_packs: List[str]
 
 
 class CredentialCreate(BaseModel):
@@ -199,6 +333,79 @@ async def delete_agent(request: Request, agent_id: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
     return {"message": "Agente excluído"}
+
+
+# ── Skill Packs Routes ────────────────────────────────────────────────────────
+# Packs são "nós condicionados": conjuntos curados de tools + prompt fragment.
+# O cliente marca os packs desejados no agente; isso determina que tools o LLM
+# enxerga e que papel ele adota. Livre de DB — o catálogo vive em skill_packs.py.
+
+@agents_router.get("/skill-packs")
+async def list_skill_packs(request: Request):
+    """Lista todos os skill packs disponíveis. Auth obrigatória."""
+    await get_current_user(request)
+    from skill_packs import list_packs_public
+    packs = list_packs_public()
+    return {"packs": packs, "total": len(packs)}
+
+
+@agents_router.get("/agents/{agent_id}/skill-packs")
+async def get_agent_skill_packs(request: Request, agent_id: str):
+    """Retorna os packs habilitados para o agente + metadata do catálogo."""
+    user = await get_current_user(request)
+    db = request.app.state.db
+    agent = await db.agents.find_one(
+        {"agent_id": agent_id, "workspace_id": user["workspace_id"]}, {"_id": 0}
+    )
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+
+    from skill_packs import list_packs_public, get_pack
+    enabled_ids = agent.get("enabled_skill_packs", []) or []
+    enabled = []
+    for pid in enabled_ids:
+        p = get_pack(pid)
+        if p:
+            # serializa sem o prompt interno
+            enabled.append({k: v for k, v in p.items() if k != "prompt"})
+    return {
+        "agent_id": agent_id,
+        "enabled_skill_packs": enabled_ids,
+        "enabled_details": enabled,
+        "available": list_packs_public(),
+    }
+
+
+@agents_router.put("/agents/{agent_id}/skill-packs")
+async def update_agent_skill_packs(request: Request, agent_id: str, body: SkillPacksUpdate):
+    """Define quais skill packs estão habilitados para este agente."""
+    user = await get_current_user(request)
+    db = request.app.state.db
+
+    from skill_packs import get_pack
+    unknown = [pid for pid in body.enabled_skill_packs if not get_pack(pid)]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Skill pack(s) desconhecido(s): {unknown}",
+        )
+
+    result = await db.agents.update_one(
+        {"agent_id": agent_id, "workspace_id": user["workspace_id"]},
+        {
+            "$set": {
+                "enabled_skill_packs": body.enabled_skill_packs,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+
+    agent = await db.agents.find_one(
+        {"agent_id": agent_id, "workspace_id": user["workspace_id"]}, {"_id": 0}
+    )
+    return {"agent": agent, "enabled_skill_packs": body.enabled_skill_packs}
 
 
 # ── Credentials Routes ────────────────────────────────────────────────────────
@@ -601,12 +808,18 @@ async def run_agent_stream(request: Request, agent_id: str, body: AgentRunReques
 
 
 async def execute_agent_streaming_queue(
-    agent: dict, user_input: str, workspace_creds: dict,
-    db=None, session_id: str = None, run_id: str = None,
+    agent: dict,
+    user_input: str,
+    workspace_creds: dict,
+    db=None,
+    session_id: str = None,
+    run_id: str = None,
     queue: asyncio.Queue = None,
+    webhook_mode: bool = False,
+    original_input_for_history: Optional[str] = None,
 ) -> tuple:
     """
-    Versão streaming REAL com asyncio.Queue.
+    Streaming REAL com asyncio.Queue — mesmas proteções anti-loop do execute_agent.
     Envia eventos token a token e tool_start/tool_done para a queue.
     Retorna (output_completo, steps) ao final.
     """
@@ -615,15 +828,31 @@ async def execute_agent_streaming_queue(
     provider = llm_config.get("provider", "openai")
     model = llm_config.get("model", "gpt-4o-mini")
     api_key = llm_config.get("api_key") or os.environ.get("EMERGENT_LLM_KEY")
-    system_prompt = llm_config.get("system_prompt", "Você é um assistente inteligente de CRM.")
+    user_system_prompt = llm_config.get(
+        "system_prompt", "Você é um assistente inteligente de CRM."
+    )
     temperature = float(llm_config.get("temperature", 0.7))
     max_tokens = int(llm_config.get("max_tokens", 4096))
 
     if not api_key:
         raise ValueError("API Key do LLM não configurada.")
 
+    # Apply the same skill-pack + CRM-rules prompt composition as execute_agent
+    skill_prompt = _compose_skill_prompt(agent)
+    system_prompt = user_system_prompt + skill_prompt + MANDATORY_CRM_RULES
+
     nodes = [n for n in agent.get("nodes", []) if n.get("type") == "tool"]
-    tool_defs = build_tool_definitions(nodes)
+    tool_defs = build_tool_definitions(nodes, agent=agent)
+
+    if webhook_mode:
+        before = len(tool_defs)
+        tool_defs = [
+            t for t in tool_defs
+            if t.get("function", {}).get("name", "") not in WEBHOOK_BLOCKED_TOOLS
+        ]
+        logger.info(
+            f"[execute_agent_streaming webhook_mode] tools: {before} → {len(tool_defs)}"
+        )
 
     history = []
     if db is not None and session_id:
@@ -636,10 +865,17 @@ async def execute_agent_streaming_queue(
         except Exception:
             pass
 
-    messages = [{"role": "system", "content": system_prompt}, *history, {"role": "user", "content": user_input}]
-    steps = []
+    messages = [
+        {"role": "system", "content": system_prompt},
+        *history,
+        {"role": "user", "content": user_input},
+    ]
+    steps: List[dict] = []
     max_iterations = 8
     litellm.set_verbose = False
+    _message_sent = False
+    _sent_text_to_lead: Optional[str] = None
+    final_output = ""
 
     async def _emit(event: dict):
         if queue is not None:
@@ -653,19 +889,31 @@ async def execute_agent_streaming_queue(
         }
         if tool_defs:
             kwargs["tools"] = tool_defs
+            if webhook_mode:
+                kwargs["tool_choice"] = "required"
 
         chunks = []
         tool_calls_raw = {}
 
-        async for chunk in await litellm.acompletion(**kwargs):
+        try:
+            stream = await litellm.acompletion(**kwargs)
+        except Exception as e:
+            if "tool_choice" in kwargs and "tool_choice" in str(e).lower():
+                logger.warning(
+                    f"[execute_agent_streaming] provider rejeitou tool_choice, retry sem: {e}"
+                )
+                kwargs.pop("tool_choice", None)
+                stream = await litellm.acompletion(**kwargs)
+            else:
+                raise
+
+        async for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
             if not delta:
                 continue
-            # Emit text tokens immediately as they arrive
             if delta.content:
                 chunks.append(delta.content)
                 await _emit({"type": "token", "text": delta.content})
-            # Accumulate tool call fragments
             if hasattr(delta, "tool_calls") and delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = tc.index
@@ -682,53 +930,100 @@ async def execute_agent_streaming_queue(
         full_content = "".join(chunks)
 
         if tool_calls_raw:
-            msg_dict = {
-                "role": "assistant", "content": full_content or "",
+            messages.append({
+                "role": "assistant",
+                "content": _sanitize_agent_text(full_content),
                 "tool_calls": [
-                    {"id": v["id"], "type": "function", "function": {"name": v["name"], "arguments": v["arguments"]}}
+                    {"id": v["id"], "type": "function",
+                     "function": {"name": v["name"], "arguments": v["arguments"]}}
                     for v in tool_calls_raw.values()
                 ],
-            }
-            messages.append(msg_dict)
+            })
 
             for v in tool_calls_raw.values():
-                fn_name = v["name"]
+                fn_name = v["name"] or ""
                 try:
-                    params = json.loads(v["arguments"])
+                    params = json.loads(v["arguments"] or "{}")
                 except Exception:
                     params = {}
                 mcp_id, tool_name = fn_name.split("__", 1) if "__" in fn_name else ("clickmassa", fn_name)
-                creds = workspace_creds.get(mcp_id, {})
 
-                # Notify frontend that a tool is running
+                is_send = _is_send_tool(fn_name)
+
+                if is_send and _message_sent:
+                    blocked = {
+                        "error": "ENVIO DUPLICADO BLOQUEADO: já foi enviada 1 mensagem nesta execução.",
+                        "blocked": True,
+                    }
+                    steps.append({
+                        "tool": fn_name, "params": params, "result": blocked,
+                        "iteration": iteration, "blocked": True,
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "content": json.dumps(blocked, ensure_ascii=False),
+                        "tool_call_id": v["id"],
+                    })
+                    await _emit({"type": "tool_done", "tool": fn_name, "result": blocked})
+                    continue
+
+                if is_send:
+                    for key in ("mensagem", "message", "body", "text", "texto"):
+                        if key in params and isinstance(params[key], str):
+                            params[key] = _sanitize_agent_text(params[key])
+
+                creds = workspace_creds.get(mcp_id, {})
                 await _emit({"type": "tool_start", "tool": fn_name, "params": params})
 
                 result = await execute_tool(mcp_id, tool_name, params, creds)
-                steps.append({"tool": fn_name, "params": params, "result": result, "iteration": iteration})
-                messages.append({"role": "tool", "content": json.dumps(result, ensure_ascii=False), "tool_call_id": v["id"]})
-
+                steps.append({
+                    "tool": fn_name, "params": params, "result": result, "iteration": iteration,
+                })
+                messages.append({
+                    "role": "tool",
+                    "content": json.dumps(result, ensure_ascii=False),
+                    "tool_call_id": v["id"],
+                })
                 await _emit({"type": "tool_done", "tool": fn_name, "result": result})
-        else:
-            final_output = full_content or "Execução concluída."
-            if db is not None and session_id:
-                try:
-                    await db.chat_sessions.update_one(
-                        {"session_id": session_id, "agent_id": agent.get("agent_id")},
-                        {"$push": {"history": {"$each": [
-                            {"role": "user", "content": user_input},
-                            {"role": "assistant", "content": final_output},
-                        ]}},
-                         "$set": {"updated_at": datetime.now(timezone.utc),
-                                  "agent_id": agent.get("agent_id"),
-                                  "session_id": session_id},
-                         "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
-                        upsert=True,
-                    )
-                except Exception:
-                    pass
-            return final_output, steps
 
-    return "Limite máximo de iterações atingido.", steps
+                if is_send:
+                    _message_sent = True
+                    _sent_text_to_lead = (
+                        params.get("mensagem") or params.get("message")
+                        or params.get("body") or params.get("text")
+                        or params.get("texto") or ""
+                    )
+
+            if _message_sent:
+                final_output = _sent_text_to_lead or _sanitize_agent_text(full_content) or "Mensagem enviada."
+                break
+        else:
+            final_output = _sanitize_agent_text(full_content) or "Execução concluída."
+            break
+
+    else:
+        final_output = final_output or "Limite máximo de iterações atingido."
+
+    # ── Histórico da sessão (branch único ao final) ─────────────────────────
+    if db is not None and session_id:
+        try:
+            clean_user_input = original_input_for_history or _extract_clean_user_input(user_input)
+            await db.chat_sessions.update_one(
+                {"session_id": session_id, "agent_id": agent.get("agent_id")},
+                {"$push": {"history": {"$each": [
+                    {"role": "user", "content": clean_user_input},
+                    {"role": "assistant", "content": final_output},
+                ]}},
+                 "$set": {"updated_at": datetime.now(timezone.utc),
+                          "agent_id": agent.get("agent_id"),
+                          "session_id": session_id},
+                 "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
+                upsert=True,
+            )
+        except Exception as e:
+            logger.warning(f"Erro ao salvar histórico streaming da sessão {session_id}: {e}")
+
+    return final_output, steps
 
 
 # Legacy alias kept for backwards compatibility (non-streaming path uses execute_agent)
@@ -761,72 +1056,58 @@ async def cleanup_stale_runs(request: Request):
     return {"cleaned": result.modified_count}
 
 
-async def execute_agent(agent: dict, user_input: str, workspace_creds: dict, db=None, session_id: str = None, max_iterations: int = 8, webhook_mode: bool = False):
+async def execute_agent(
+    agent: dict,
+    user_input: str,
+    workspace_creds: dict,
+    db=None,
+    session_id: str = None,
+    max_iterations: int = 8,
+    webhook_mode: bool = False,
+    original_input_for_history: Optional[str] = None,
+):
+    """
+    Orquestra a execução do agente LLM com as ferramentas do MCP.
+
+    Anti-loop guarantees (ordem de defesa):
+      1. Tools de busca de histórico são BLOQUEADAS em webhook_mode.
+      2. Apenas UM envio de mensagem ao lead por execução (singleton send).
+      3. msg.content e tool args passam por _sanitize_agent_text antes de sair.
+      4. tool_choice="required" em webhook_mode força o LLM a chamar tool
+         ao invés de devolver texto livre (previne divagação).
+      5. Histórico salvo uma única vez ao final com o texto realmente enviado.
+    """
     import litellm
     llm_config = agent.get("llm_config", {})
     provider = llm_config.get("provider", "openai")
     model = llm_config.get("model", "gpt-4o-mini")
     api_key = llm_config.get("api_key") or os.environ.get("EMERGENT_LLM_KEY")
-    user_system_prompt = llm_config.get("system_prompt", "Você é um assistente inteligente de CRM. Responda sempre em português.")
+    user_system_prompt = llm_config.get(
+        "system_prompt",
+        "Você é um assistente inteligente de CRM. Responda sempre em português.",
+    )
     temperature = float(llm_config.get("temperature", 0.7))
     max_tokens = int(llm_config.get("max_tokens", 4096))
 
     if not api_key:
         raise ValueError("API Key do LLM não configurada. Configure no nó LLM do agente.")
 
-    # Mandatory CRM behavior rules appended to every agent
-    MANDATORY_CRM_RULES = """
+    # Compose system prompt: user prompt + mandatory CRM rules + skill pack fragments
+    skill_prompt = _compose_skill_prompt(agent)
+    system_prompt = user_system_prompt + skill_prompt + MANDATORY_CRM_RULES
 
----
-REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
-
-1. DIREÇÃO DAS MENSAGENS NOS TICKETS:
-   Ao receber mensagens do CRM, cada mensagem virá prefixada assim:
-   - [LEAD]: texto → O CLIENTE/LEAD escreveu isso. É a voz do cliente.
-   - [EMPRESA]: texto → A EMPRESA/ATENDENTE enviou isso. NÃO é o cliente falando.
-   - [NOTA INTERNA]: texto → Nota interna da equipe, invisível ao lead.
-   NUNCA confunda [EMPRESA] com mensagem do lead.
-   Sempre leia todos os prefixos antes de tirar conclusões sobre o que o lead quer.
-
-2. QUANDO ENVIAR MENSAGEM AO LEAD:
-   - Se o input começar com "[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]":
-     * Use "enviar_mensagem_direta" ou "enviar_mensagem" EXATAMENTE UMA VEZ.
-     * APÓS enviar, PARE COMPLETAMENTE. Não faça mais nenhuma chamada de ferramenta.
-     * NÃO use "buscar_mensagens_ticket" — a mensagem já está no input.
-     * NÃO simule o lead respondendo. NÃO continue a conversa sozinho.
-     * Resposta em UMA mensagem, encerrada.
-   - Em outros contextos, use "enviar_mensagem_direta" SOMENTE quando explicitamente pedido.
-   - NUNCA envie mensagens múltiplas em sequência sem o lead ter respondido entre elas.
-
-3. QUANDO USAR NOTA INTERNA (enviar_nota_interna):
-   - Para TODA análise, qualificação, classificação, resumo, observação ou alerta de uso interno.
-   - A nota interna NÃO aparece para o lead — é visível apenas para a equipe.
-
-4. TRANSFERÊNCIA PARA HUMANO:
-   - Use "devolver_para_fila" para devolver ticket a um atendente humano.
-   - Avise ao usuário quando transferir.
-
-5. ANÁLISE DE TICKETS:
-   - Ao analisar tickets, primeiro chame "buscar_mensagens_ticket" para ver a conversa completa.
-   - Use os prefixos [LEAD], [EMPRESA], [NOTA INTERNA] para entender quem disse o quê.
----"""
-
-    system_prompt = user_system_prompt + MANDATORY_CRM_RULES
-
+    # Build tool definitions: either from classic nodes, or expanded from
+    # enabled_skill_packs, or both.
     nodes = [n for n in agent.get("nodes", []) if n.get("type") == "tool"]
-    tool_defs = build_tool_definitions(nodes)
+    tool_defs = build_tool_definitions(nodes, agent=agent)
 
     # Em modo webhook o agente só pode ENVIAR — ferramentas de busca são bloqueadas.
     # Isso evita o loop "busca histórico → vê resposta própria → responde de novo".
     if webhook_mode:
-        BLOCKED_WEBHOOK_TOOLS = {
-            "buscar_mensagens_ticket", "listar_tickets_pendentes",
-            "buscar_tickets", "get_messages", "list_messages",
-        }
         before = len(tool_defs)
         tool_defs = [
             t for t in tool_defs
-            if t.get("function", {}).get("name", "") not in BLOCKED_WEBHOOK_TOOLS
+            if t.get("function", {}).get("name", "") not in WEBHOOK_BLOCKED_TOOLS
         ]
         logger.info(
             f"[execute_agent webhook_mode] tools: {before} total → {len(tool_defs)} disponíveis "
@@ -839,7 +1120,7 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
         try:
             doc = await db.chat_sessions.find_one(
                 {"session_id": session_id, "agent_id": agent.get("agent_id")},
-                {"_id": 0}
+                {"_id": 0},
             )
             if doc:
                 history = doc.get("history", [])
@@ -855,9 +1136,11 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
         {"role": "user", "content": user_input},
     ]
 
-    steps = []
+    steps: List[dict] = []
     litellm.set_verbose = False
-    _message_sent = False  # flag: quebra o loop após primeiro envio de mensagem
+    _message_sent = False              # singleton guard: only one send per run
+    _sent_text_to_lead: Optional[str] = None  # the text actually delivered to the lead
+    final_output = ""
 
     for iteration in range(max_iterations):
         kwargs = {
@@ -869,23 +1152,49 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
         }
         if tool_defs:
             kwargs["tools"] = tool_defs
+            # In webhook mode force the LLM to call a tool rather than freely
+            # chatting — this is the strongest single defense against the
+            # "agent responds to itself" failure mode. If a provider rejects
+            # the flag (some non-OpenAI models via litellm), we retry without.
+            if webhook_mode:
+                kwargs["tool_choice"] = "required"
 
-        response = await litellm.acompletion(**kwargs)
+        try:
+            response = await litellm.acompletion(**kwargs)
+        except Exception as e:
+            if "tool_choice" in kwargs and "tool_choice" in str(e).lower():
+                logger.warning(
+                    f"[execute_agent] provider não aceita tool_choice=required, "
+                    f"removendo e tentando de novo: {e}"
+                )
+                kwargs.pop("tool_choice", None)
+                response = await litellm.acompletion(**kwargs)
+            else:
+                raise
+
         msg = response.choices[0].message
 
-        if hasattr(msg, "tool_calls") and msg.tool_calls:
-            msg_dict = {"role": "assistant", "content": msg.content or ""}
-            if msg.tool_calls:
-                msg_dict["tool_calls"] = [
-                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+        has_tool_calls = hasattr(msg, "tool_calls") and msg.tool_calls
+        if has_tool_calls:
+            # Record the assistant turn (with tool calls) for the next iteration's context.
+            raw_content = msg.content or ""
+            messages.append({
+                "role": "assistant",
+                "content": _sanitize_agent_text(raw_content),
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
                     for tc in msg.tool_calls
-                ]
-            messages.append(msg_dict)
+                ],
+            })
 
             for tc in msg.tool_calls:
-                fn_name = tc.function.name
+                fn_name = tc.function.name or ""
                 try:
-                    params = json.loads(tc.function.arguments)
+                    params = json.loads(tc.function.arguments or "{}")
                 except Exception:
                     params = {}
 
@@ -894,6 +1203,43 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
                     mcp_id, tool_name = fn_name.split("__", 1)
                 else:
                     mcp_id, tool_name = "clickmassa", fn_name
+
+                is_send = _is_send_tool(fn_name)
+
+                # Singleton guard: at most ONE send to the lead per execution.
+                # Any subsequent send call (same iteration or later) is blocked
+                # with a controlled error tool result — the LLM sees it and
+                # stops trying to double-message.
+                if is_send and _message_sent:
+                    blocked = {
+                        "error": (
+                            "ENVIO DUPLICADO BLOQUEADO: já foi enviada 1 mensagem ao "
+                            "lead nesta execução. Encerre a resposta — não chame mais "
+                            "ferramentas de envio."
+                        ),
+                        "blocked": True,
+                    }
+                    steps.append({
+                        "tool": fn_name,
+                        "params": params,
+                        "result": blocked,
+                        "iteration": iteration,
+                        "blocked": True,
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "content": json.dumps(blocked, ensure_ascii=False),
+                        "tool_call_id": tc.id,
+                    })
+                    continue
+
+                # Sanitize the outbound message text BEFORE it leaves the system.
+                # This is the last line of defense against hallucinated dialogue
+                # ("Lead: ...\nAgente: ...") being delivered to the real lead.
+                if is_send:
+                    for key in ("mensagem", "message", "body", "text", "texto"):
+                        if key in params and isinstance(params[key], str):
+                            params[key] = _sanitize_agent_text(params[key])
 
                 creds = workspace_creds.get(mcp_id, {})
                 result = await execute_tool(mcp_id, tool_name, params, creds)
@@ -910,44 +1256,56 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
                     "tool_call_id": tc.id,
                 })
 
-                # Após enviar mensagem ao lead, encerra o loop para não entrar em loop infinito
-                if "enviar_mensagem" in fn_name:
+                if is_send:
                     _message_sent = True
+                    _sent_text_to_lead = (
+                        params.get("mensagem")
+                        or params.get("message")
+                        or params.get("body")
+                        or params.get("text")
+                        or params.get("texto")
+                        or ""
+                    )
 
             if _message_sent:
-                # Gera uma resposta final de texto sem chamar mais ferramentas
-                final_output = msg.content or "Mensagem enviada ao lead."
+                # Whatever was actually delivered to the lead is our canonical output.
+                final_output = _sent_text_to_lead or _sanitize_agent_text(msg.content) or "Mensagem enviada ao lead."
                 break
         else:
-            final_output = msg.content or "Execução concluída sem resposta."
+            # Text-only response. This is the normal terminating branch for
+            # non-webhook chat runs (e.g. user chatting with the agent in the UI).
+            final_output = _sanitize_agent_text(msg.content) or "Execução concluída sem resposta."
+            break
 
-            # ── Salva histórico da sessão no MongoDB ────────────────────────
-            if db is not None and session_id:
-                try:
-                    # Adiciona ao histórico: a mensagem do usuário + a resposta do agente
-                    new_entries = [
-                        {"role": "user", "content": user_input},
-                        {"role": "assistant", "content": final_output},
-                    ]
-                    await db.chat_sessions.update_one(
-                        {"session_id": session_id, "agent_id": agent.get("agent_id")},
-                        {
-                            "$push": {"history": {"$each": new_entries}},
-                            "$set": {
-                                "updated_at": datetime.now(timezone.utc),
-                                "agent_id": agent.get("agent_id"),
-                                "session_id": session_id,
-                            },
-                            "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
-                        },
-                        upsert=True,
-                    )
-                except Exception as e:
-                    logger.warning(f"Erro ao salvar histórico da sessão {session_id}: {e}")
+    else:
+        # for/else: loop exhausted without break
+        final_output = final_output or "Limite máximo de iterações atingido."
 
-            return final_output, steps
+    # ── Persiste histórico da sessão (branch único — sempre executa) ────────
+    if db is not None and session_id:
+        try:
+            clean_user_input = original_input_for_history or _extract_clean_user_input(user_input)
+            new_entries = [
+                {"role": "user", "content": clean_user_input},
+                {"role": "assistant", "content": final_output},
+            ]
+            await db.chat_sessions.update_one(
+                {"session_id": session_id, "agent_id": agent.get("agent_id")},
+                {
+                    "$push": {"history": {"$each": new_entries}},
+                    "$set": {
+                        "updated_at": datetime.now(timezone.utc),
+                        "agent_id": agent.get("agent_id"),
+                        "session_id": session_id,
+                    },
+                    "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
+                },
+                upsert=True,
+            )
+        except Exception as e:
+            logger.warning(f"Erro ao salvar histórico da sessão {session_id}: {e}")
 
-    return "Limite máximo de iterações atingido.", steps
+    return final_output, steps
 
 
 # ── Workspace Routes ──────────────────────────────────────────────────────────
@@ -1352,11 +1710,13 @@ async def webhook_trigger(
     # Executa agente em background (fire-and-forget)
     async def run_background():
         try:
-            # webhook_mode=True: remove ferramentas de busca de histórico
-            # Isso impede o loop "busca histórico → vê resposta própria → responde de novo"
+            # webhook_mode=True: remove ferramentas de busca de histórico e força
+            # tool_choice=required. original_input_for_history salva apenas a mensagem
+            # limpa do lead no histórico, não o envelope de instrução do webhook.
             output, steps = await execute_agent(
                 agent, user_input, workspace_creds, db=db, session_id=session_id,
-                max_iterations=3, webhook_mode=True
+                max_iterations=3, webhook_mode=True,
+                original_input_for_history=original_input,
             )
 
             # Fallback automático: se o agente gerou texto mas não chamou enviar_mensagem,

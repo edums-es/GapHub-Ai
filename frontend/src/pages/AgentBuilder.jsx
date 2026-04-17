@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { Save, Play, Plus, Trash2, ArrowLeft, Settings, X, ChevronDown, SendHorizontal, Bot, Zap, Database, Globe, Search, Layers } from "lucide-react";
 import axios from "axios";
 import Layout from "@/components/Layout";
+import SkillPackSelector from "@/components/SkillPackSelector";
 
 const API = process.env.REACT_APP_BACKEND_URL + "/api";
 
@@ -511,6 +512,8 @@ export default function AgentBuilder() {
   const [showMcpCredsForm, setShowMcpCredsForm] = useState(false);
   const [mcpCredsForm, setMcpCredsForm] = useState({ apiUrl: "", userToken: "", wabaId: "" });
   const [savingMcpCreds, setSavingMcpCreds] = useState(false);
+  // Skill packs habilitados no agente (nós condicionados)
+  const [enabledSkillPacks, setEnabledSkillPacks] = useState([]);
 
   // Bug Fix #5 — Zoom/Pan: controles de zoom e pan no canvas via CSS transform
   const [zoom, setZoom] = useState(1.0);
@@ -562,6 +565,7 @@ export default function AgentBuilder() {
           setNodes(a.nodes || []);
           setEdges(a.edges || []);
           setLlmConfig(a.llm_config || {});
+          setEnabledSkillPacks(a.enabled_skill_packs || []);
         })
         .finally(() => setLoading(false));
       // Carrega info de webhook (sem exibir o secret)
@@ -665,7 +669,7 @@ export default function AgentBuilder() {
     setValidationErrors([]);
     setSaving(true);
     try {
-      const payload = { name: agentName, nodes, edges, llm_config: llmConfig };
+      const payload = { name: agentName, nodes, edges, llm_config: llmConfig, enabled_skill_packs: enabledSkillPacks };
       if (isNew) {
         const { data } = await axios.post(`${API}/agents`, payload, { withCredentials: true });
         setAgent(data);
@@ -777,6 +781,16 @@ export default function AgentBuilder() {
                 <Layers size={13} />
                 <span style={{ fontWeight: 600 }}>Templates</span>
               </button>
+            </div>
+
+            {/* Skill Packs — nós condicionados (braços funcionais do agente) */}
+            <div style={{ overflowY: "auto", maxHeight: 320 }}>
+              <SkillPackSelector
+                agentId={agent?.agent_id}
+                initialEnabled={enabledSkillPacks}
+                onChange={setEnabledSkillPacks}
+                disabled={!agent}
+              />
             </div>
 
             {/* Webhook section — apenas para agentes já salvos */}
