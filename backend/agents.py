@@ -70,12 +70,25 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
    NUNCA confunda [EMPRESA] com mensagem do lead.
    Sempre leia todos os prefixos antes de tirar conclusões sobre o que o lead quer.
 
-2. QUANDO ENVIAR MENSAGEM AO LEAD:
+2. OBRIGATÓRIO: USAR TOOLS QUANDO AÇÕES FOREM SOLICITADAS:
+   Se o lead SOLICITAR qualquer ação, você DEVE usar a ferramenta apropriada:
+   - "quero agendar uma call/reunião" → Use "criar_tarefa" para criar lembrete
+   - "me lembra de algo" → Use "criar_tarefa"
+   - "quem é você?" → Responda normalmente, sem tool necessária
+   - "vou passar o contato" → Use "atualizar_contato" para adicionar info
+   - Quando não souber → Use "devolver_para_fila" para transferir para humano
+   
+   Ao usar ferramentas:
+   - Use APENAS APÓS entender a solicitação completa
+   - NUNCA promises sem usar tool ("vou agendar" sem criar tarefa = NÃO有效!)
+   - Use "enviar_nota_internal" para registrar contexto da ação
+
+3. QUANDO ENVIAR MENSAGEM AO LEAD:
    - Se o input começar com "[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]":
      * Use "enviar_mensagem" ou "enviar_mensagem_direta" EXATAMENTE UMA VEZ.
      * O sistema adiciona automaticamente fromMe=True para registrar como mensagem da empresa.
      * APÓS enviar, PARE COMPLETAMENTE. Não faça mais nenhuma chamada de ferramenta.
-     * NÃO use "buscar_mensagens_ticket" — a mensagem já está no input.
+     * DON'T use "buscar_mensagens_ticket" — a mensagem já está no input.
      * NÃO simule o lead respondendo. NÃO continue a conversa sozinho.
      * Resposta em UMA mensagem, encerrada.
    - Em outros contextos, use "enviar_mensagem_direta" SOMENTE quando explicitamente pedido.
@@ -149,18 +162,26 @@ REGRAS OBRIGATÓRIAS — MODO WEBHOOK (SEMPRE SIGA, SEM EXCEÇÃO):
    histórico. A mensagem do lead já está no input, entre aspas. Tudo que você
    precisa está ali.
 
-3. TOOLS DE ENVIO: Pode usar `enviar_mensagem` ou `enviar_mensagem_direta`.
+3. OBRIGATÓRIO: USAR TOOLS PARA AÇÕES SOLICITADAS:
+   Se o lead SOLICITAR qualquer ação, você DEVE usar a ferramenta:
+   - "agendar call/reunião" → Use "criar_tarefa" (CRÍTICO!)
+   - "me lembra de algo" → Use "criar_tarefa"
+   - "vou passar meu email" → Use "atualizar_contato"
+   - Quando não souber fazer → Use "devolver_para_fila" para transferir
+   - NÃO promises sem executar: "vou agendar" → DEVE criar tarefa
+
+4. TOOLS DE ENVIO: Pode usar `enviar_mensagem` ou `enviar_mensagem_direta`.
    Ambas adicionam fromMe=True automaticamente para registrar como mensagem da empresa.
 
-4. VALORES IMUTÁVEIS: Ao chamar ferramentas de envio, use EXATAMENTE
+5. VALORES IMUTÁVEIS: Ao chamar ferramentas de envio, use EXATAMENTE
    o número fornecido no input. Se passar outro valor, a chamada será rejeitada.
 
-5. UMA MENSAGEM, UMA SÓ: Envie UMA única resposta ao lead e PARE. Não encadeie
+6. UMA MENSAGEM, UMA SÓ: Envie UMA única resposta ao lead e PARE. Não encadeie
    mensagens, não continue a conversa sozinho, não simule o lead respondendo.
    NUNCA escreva "Lead: ...", "Cliente: ...", "Agente: ..." dentro do texto.
 
-6. NOTA INTERNA É SÓ PARA REGISTRO: Use usar_nota_interna apenas para
-   observações internas da equipe. Não substitui a resposta ao lead.
+7. NOTA INTERNA É SÓ PARA REGISTRO: Use "enviar_nota_interna" para
+   registrar contexto, observações e ações tomadas. NÃO substitui resposta.
 ---"""
 
 
@@ -1935,8 +1956,8 @@ async def webhook_trigger(
     # separadamente, gerando a rajada de respostas iguais que o operador vê no CRM.
     # Aqui: se o agente já respondeu este ticket nos últimos N segundos, ignora o
     # webhook (a próxima mensagem do lead só será atendida depois da janela).
-    # Configurável via agent.webhook_cooldown_seconds (default 15s, 0 desliga).
-    cooldown_seconds = int(agent.get("webhook_cooldown_seconds", 15) or 0)
+    # REDUZIDO para 5s default - mais responsivo enquanto evita rajadas.
+    cooldown_seconds = int(agent.get("webhook_cooldown_seconds", 5) or 0)
     if cooldown_seconds > 0 and ticket_id:
         last_reply = await db.webhook_last_reply.find_one(
             {"agent_id": agent_id, "ticket_id": str(ticket_id)}
