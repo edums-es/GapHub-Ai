@@ -220,3 +220,122 @@ def test_webhook_blocks_history_search_tools():
     from agents import WEBHOOK_BLOCKED_TOOLS
     assert "buscar_mensagens_ticket" in WEBHOOK_BLOCKED_TOOLS
     assert "clickmassa__buscar_mensagens_ticket" in WEBHOOK_BLOCKED_TOOLS
+
+
+def test_webhook_blocks_ticket_listing_tools():
+    """Tools que fazem o agente ver OUTROS tickets devem estar bloqueadas."""
+    from agents import WEBHOOK_BLOCKED_TOOLS
+    for t in [
+        "listar_tickets_abertos", "listar_tickets_pendentes", "listar_tickets",
+        "buscar_tickets", "buscar_ticket_por_id",
+        "buscar_contato_por_numero", "buscar_contato_por_id", "listar_contatos",
+    ]:
+        assert t in WEBHOOK_BLOCKED_TOOLS, f"{t} deveria estar bloqueada em webhook"
+        assert f"clickmassa__{t}" in WEBHOOK_BLOCKED_TOOLS, f"clickmassa__{t} deveria estar bloqueada"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _enforce_ticket_scope — rejeita envio para ticket/número errado
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_enforce_ticket_scope_accepts_matching_ticket():
+    from agents import _enforce_ticket_scope
+    params, err = _enforce_ticket_scope(
+        "enviar_mensagem_direta",
+        {"ticket_id": "66378", "mensagem": "oi"},
+        allowed_ticket_id="66378", allowed_numero="5511988887777",
+    )
+    assert err is None
+    assert params["ticket_id"] == "66378"
+
+
+def test_enforce_ticket_scope_rejects_mismatched_ticket():
+    from agents import _enforce_ticket_scope
+    _, err = _enforce_ticket_scope(
+        "enviar_mensagem_direta",
+        {"ticket_id": "99999", "mensagem": "oi"},  # ticket errado
+        allowed_ticket_id="66378", allowed_numero="",
+    )
+    assert err is not None
+    assert err.get("blocked") is True
+    assert err.get("scope_violation") is True
+
+
+def test_enforce_ticket_scope_rejects_mismatched_numero():
+    from agents import _enforce_ticket_scope
+    _, err = _enforce_ticket_scope(
+        "enviar_mensagem",
+        {"numero": "5511000000000", "mensagem": "oi"},
+        allowed_ticket_id="", allowed_numero="5511988887777",
+    )
+    assert err is not None
+    assert err.get("blocked") is True
+
+
+def test_enforce_ticket_scope_injects_missing_ticket_id():
+    """Se o LLM esquecer o ticket_id, o scope lock injeta o correto."""
+    from agents import _enforce_ticket_scope
+    params, err = _enforce_ticket_scope(
+        "enviar_mensagem_direta",
+        {"mensagem": "oi"},  # sem ticket_id
+        allowed_ticket_id="66378", allowed_numero="",
+    )
+    assert err is None
+    assert params["ticket_id"] == "66378"
+
+
+def test_enforce_ticket_scope_injects_missing_numero():
+    from agents import _enforce_ticket_scope
+    params, err = _enforce_ticket_scope(
+        "enviar_mensagem",
+        {"mensagem": "oi"},  # sem numero
+        allowed_ticket_id="", allowed_numero="5511988887777",
+    )
+    assert err is None
+    assert params["numero"] == "5511988887777"
+
+
+def test_enforce_ticket_scope_passes_through_non_scoped_tools():
+    """Tools que não são de envio passam inalteradas."""
+    from agents import _enforce_ticket_scope
+    params, err = _enforce_ticket_scope(
+        "buscar_mensagens_ticket",
+        {"ticket_id": "99999"},
+        allowed_ticket_id="66378", allowed_numero="",
+    )
+    assert err is None
+    assert params["ticket_id"] == "99999"  # não alterado
+
+
+def test_enforce_ticket_scope_mcp_namespaced():
+    """Prefixo clickmassa__ deve ser reconhecido."""
+    from agents import _enforce_ticket_scope
+    _, err = _enforce_ticket_scope(
+        "clickmassa__enviar_mensagem_direta",
+        {"ticket_id": "99999"},
+        allowed_ticket_id="66378", allowed_numero="",
+    )
+    assert err is not None
+    assert err.get("scope_violation") is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANDATORY_CRM_RULES_WEBHOOK — versão enxuta, consistente com tools permitidas
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_webhook_rules_do_not_mention_blocked_tools():
+    """O prompt de webhook NÃO pode mandar chamar tools bloqueadas."""
+    from agents import MANDATORY_CRM_RULES_WEBHOOK, WEBHOOK_BLOCKED_TOOLS
+    for tool in ("buscar_mensagens_ticket", "listar_tickets_pendentes", "listar_tickets_abertos"):
+        assert tool in WEBHOOK_BLOCKED_TOOLS  # sanity
+        assert tool not in MANDATORY_CRM_RULES_WEBHOOK, (
+            f"O prompt de webhook menciona '{tool}' que está bloqueada — contradição"
+        )
+
+
+def test_webhook_rules_emphasize_scope():
+    """O prompt de webhook precisa deixar explícito que o ticket_id é imutável."""
+    from agents import MANDATORY_CRM_RULES_WEBHOOK
+    txt = MANDATORY_CRM_RULES_WEBHOOK.lower()
+    assert "escopo" in txt or "único" in txt
+    assert "ticket_id" in txt

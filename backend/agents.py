@@ -98,17 +98,125 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
 
 # Tools that are blocked in webhook mode: if we already have the lead's message
 # in the payload, re-fetching ticket history just lets the agent see its own
-# prior reply and answer itself.
+# prior reply and answer itself. Any tool that lets the LLM "look at other
+# tickets" is blocked — the agent must stay strictly scoped to the ticket
+# that triggered the webhook.
 WEBHOOK_BLOCKED_TOOLS = {
+    # Listagem/busca de mensagens ou outros tickets (fuga de escopo)
     "buscar_mensagens_ticket",
     "listar_tickets_pendentes",
+    "listar_tickets_abertos",
+    "listar_tickets",
     "buscar_tickets",
+    "buscar_ticket_por_id",
+    "buscar_contato_por_numero",
+    "buscar_contato_por_id",
+    "listar_contatos",
     "get_messages",
     "list_messages",
-    # MCP-namespaced variants
+    # MCP-namespaced variants (clickmassa__*)
     "clickmassa__buscar_mensagens_ticket",
     "clickmassa__listar_tickets_pendentes",
+    "clickmassa__listar_tickets_abertos",
+    "clickmassa__listar_tickets",
+    "clickmassa__buscar_tickets",
+    "clickmassa__buscar_ticket_por_id",
+    "clickmassa__buscar_contato_por_numero",
+    "clickmassa__buscar_contato_por_id",
+    "clickmassa__listar_contatos",
 }
+
+
+# ── MANDATORY_CRM_RULES variant for webhook mode ──────────────────────────────
+# The default rules reference tools like buscar_mensagens_ticket that are blocked
+# in webhook mode. Using the default prompt creates a contradiction (prompt says
+# "use buscar_mensagens_ticket" but the tool is absent). This slim version is
+# self-consistent with the tool allow-list.
+MANDATORY_CRM_RULES_WEBHOOK = """
+
+---
+REGRAS OBRIGATÓRIAS — MODO WEBHOOK (SEMPRE SIGA, SEM EXCEÇÃO):
+
+1. ESCOPO ÚNICO: Você está respondendo a UM ÚNICO ticket.
+   O ticket_id e o número do lead estão no input. É PROIBIDO agir em outro ticket,
+   outro contato ou qualquer recurso que não seja este ticket específico.
+
+2. SEM LISTAGEM, SEM BUSCA: Não liste tickets, não busque contatos, não puxe
+   histórico. A mensagem do lead já está no input, entre aspas. Tudo que você
+   precisa está ali.
+
+3. VALORES IMUTÁVEIS: Quando chamar enviar_mensagem / enviar_mensagem_direta /
+   enviar_midia, use EXATAMENTE o ticket_id e o número fornecidos no input.
+   Se você passar outro valor, a chamada será rejeitada e você será forçado a parar.
+
+4. UMA MENSAGEM, UMA SÓ: Envie UMA única resposta ao lead e PARE. Não encadeie
+   mensagens, não continue a conversa sozinho, não simule o lead respondendo.
+   NUNCA escreva "Lead: ...", "Cliente: ...", "Agente: ..." dentro do texto.
+
+5. NOTA INTERNA É SÓ PARA REGISTRO: Use enviar_nota_interna apenas para
+   observações internas da equipe. Não substitui a resposta ao lead.
+---"""
+
+
+def _enforce_ticket_scope(
+    fn_name: str,
+    params: dict,
+    allowed_ticket_id: str,
+    allowed_numero: str,
+) -> tuple:
+    """
+    Em webhook_mode, valida que tools de envio/ação só operam no ticket/número
+    que disparou o webhook. Retorna (params_ajustados, erro_dict_ou_None).
+
+    Comportamento:
+      - Se params traz ticket_id diferente do esperado → retorna erro (blocked).
+      - Se params traz numero/phone diferente do esperado → retorna erro.
+      - Se não trouxer, injeta o valor correto (LLM às vezes esquece).
+      - Tools que não são de envio passam inalteradas.
+    """
+    bare = fn_name.split("__", 1)[1] if "__" in (fn_name or "") else (fn_name or "")
+    # Tools sensíveis ao escopo do ticket (qualquer uma que aceita ticket_id ou numero)
+    scoped_tools = {
+        "enviar_mensagem", "enviar_mensagem_direta", "enviar_midia",
+        "enviar_nota_interna", "fechar_ticket", "devolver_para_fila",
+    }
+    if bare not in scoped_tools:
+        return params, None
+
+    out = dict(params or {})
+
+    if allowed_ticket_id:
+        provided_tid = str(out.get("ticket_id") or "").strip()
+        if provided_tid and provided_tid != str(allowed_ticket_id):
+            return out, {
+                "error": (
+                    f"TICKET FORA DE ESCOPO: você tentou operar no ticket_id={provided_tid}, "
+                    f"mas o webhook só permite responder no ticket_id={allowed_ticket_id}. "
+                    f"Chamada REJEITADA. Encerre a resposta imediatamente."
+                ),
+                "blocked": True,
+                "scope_violation": True,
+            }
+        if not provided_tid and bare in {"enviar_mensagem_direta", "enviar_nota_interna", "fechar_ticket", "devolver_para_fila"}:
+            out["ticket_id"] = str(allowed_ticket_id)
+
+    if allowed_numero:
+        for key in ("numero", "number", "phone", "phone_number"):
+            provided_num = str(out.get(key) or "").strip()
+            if provided_num and provided_num != str(allowed_numero):
+                return out, {
+                    "error": (
+                        f"NÚMERO FORA DE ESCOPO: você tentou enviar para {key}={provided_num}, "
+                        f"mas o webhook só permite responder ao número {allowed_numero}. "
+                        f"Chamada REJEITADA. Encerre a resposta imediatamente."
+                    ),
+                    "blocked": True,
+                    "scope_violation": True,
+                }
+        if bare == "enviar_mensagem" and not any(out.get(k) for k in ("numero", "number", "phone", "phone_number")):
+            out["numero"] = str(allowed_numero)
+
+    return out, None
 
 
 _WEBHOOK_PREFIX_RE = re.compile(
@@ -1065,17 +1173,20 @@ async def execute_agent(
     max_iterations: int = 8,
     webhook_mode: bool = False,
     original_input_for_history: Optional[str] = None,
+    allowed_ticket_id: str = "",
+    allowed_numero: str = "",
 ):
     """
     Orquestra a execução do agente LLM com as ferramentas do MCP.
 
     Anti-loop guarantees (ordem de defesa):
-      1. Tools de busca de histórico são BLOQUEADAS em webhook_mode.
-      2. Apenas UM envio de mensagem ao lead por execução (singleton send).
-      3. msg.content e tool args passam por _sanitize_agent_text antes de sair.
-      4. tool_choice="required" em webhook_mode força o LLM a chamar tool
-         ao invés de devolver texto livre (previne divagação).
-      5. Histórico salvo uma única vez ao final com o texto realmente enviado.
+      1. Tools de busca/listagem são BLOQUEADAS em webhook_mode (WEBHOOK_BLOCKED_TOOLS).
+      2. Tools de envio são LOCKADAS ao ticket_id/número do disparador
+         via _enforce_ticket_scope — se o LLM trocar os IDs, a chamada é rejeitada.
+      3. Apenas UM envio de mensagem ao lead por execução (singleton send).
+      4. msg.content e tool args passam por _sanitize_agent_text antes de sair.
+      5. tool_choice="required" em webhook_mode força o LLM a chamar tool.
+      6. Histórico salvo uma única vez ao final com o texto realmente enviado.
     """
     import litellm
     llm_config = agent.get("llm_config", {})
@@ -1092,9 +1203,12 @@ async def execute_agent(
     if not api_key:
         raise ValueError("API Key do LLM não configurada. Configure no nó LLM do agente.")
 
-    # Compose system prompt: user prompt + mandatory CRM rules + skill pack fragments
+    # Compose system prompt: user prompt + mandatory CRM rules + skill pack fragments.
+    # Em webhook_mode usamos uma versão ENXUTA das regras, consistente com a
+    # lista de tools permitidas (sem mencionar buscar_mensagens_ticket etc.).
     skill_prompt = _compose_skill_prompt(agent)
-    system_prompt = user_system_prompt + skill_prompt + MANDATORY_CRM_RULES
+    rules = MANDATORY_CRM_RULES_WEBHOOK if webhook_mode else MANDATORY_CRM_RULES
+    system_prompt = user_system_prompt + skill_prompt + rules
 
     # Build tool definitions: either from classic nodes, or expanded from
     # enabled_skill_packs, or both.
@@ -1240,6 +1354,33 @@ async def execute_agent(
                     for key in ("mensagem", "message", "body", "text", "texto"):
                         if key in params and isinstance(params[key], str):
                             params[key] = _sanitize_agent_text(params[key])
+
+                # TICKET SCOPE LOCK — em webhook_mode, valida que o LLM não está
+                # tentando enviar para outro ticket/número. Se tentar, a chamada
+                # é REJEITADA e o LLM recebe um tool_result de erro → para.
+                if webhook_mode and (allowed_ticket_id or allowed_numero):
+                    params, scope_err = _enforce_ticket_scope(
+                        fn_name, params, allowed_ticket_id, allowed_numero
+                    )
+                    if scope_err:
+                        logger.warning(
+                            f"[execute_agent webhook_mode] scope violation em {fn_name}: "
+                            f"tentou ticket={params.get('ticket_id')} numero={params.get('numero') or params.get('phone_number')} "
+                            f"permitido=ticket_id={allowed_ticket_id} numero={allowed_numero}"
+                        )
+                        steps.append({
+                            "tool": fn_name,
+                            "params": params,
+                            "result": scope_err,
+                            "iteration": iteration,
+                            "blocked": True,
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "content": json.dumps(scope_err, ensure_ascii=False),
+                            "tool_call_id": tc.id,
+                        })
+                        continue
 
                 creds = workspace_creds.get(mcp_id, {})
                 result = await execute_tool(mcp_id, tool_name, params, creds)
@@ -1521,6 +1662,78 @@ async def webhook_trigger(
         logger.info(f"[Webhook {agent_id}] ignorado: nota interna ou notificação")
         return {"status": "ignored", "reason": "Nota interna ou notificação ignorada"}
 
+    # ── GATE DE STATUS DO TICKET ──────────────────────────────────────────────
+    # O agente SÓ age em tickets pendentes (aguardando atendimento).
+    # Tickets já em atendimento por humano / fechados / resolvidos → NÃO responde.
+    # Isso evita o bot responder tickets que o operador está tratando.
+    #
+    # A lista de status permitidos é configurável por variável de ambiente
+    # WEBHOOK_ALLOWED_STATUSES (csv). Default cobre os nomes comuns do ClickMassa/
+    # WAHA/Chatwoot para "pendente".
+    allowed_statuses_env = os.environ.get(
+        "WEBHOOK_ALLOWED_STATUSES",
+        "pending,pendente,waiting,aguardando,novo,new,open_pending,"
+    )
+    ALLOWED_TICKET_STATUSES = {
+        s.strip().lower() for s in allowed_statuses_env.split(",") if s.strip()
+    }
+    # Se o agente tiver override no doc, usa ele
+    agent_allowed = agent.get("webhook_allowed_statuses")
+    if isinstance(agent_allowed, list) and agent_allowed:
+        ALLOWED_TICKET_STATUSES = {str(s).lower() for s in agent_allowed if s}
+
+    ticket_status_raw = (
+        ticket_obj.get("status")
+        or ticket_obj.get("state")
+        or data_wrap.get("status")
+        or payload.get("ticketStatus")
+        or payload.get("status")
+        or ""
+    )
+    ticket_status = str(ticket_status_raw).strip().lower()
+
+    # Status vazio = tratamos como permitido (muitos CRMs não enviam status no webhook
+    # de nova mensagem do lead, apenas no de mudança de status). O importante é
+    # bloquear quando o status diz claramente "atendido/fechado/resolvido".
+    BLOCKED_KEYWORDS = ("closed", "resolved", "fechado", "resolvido", "attending", "em_atendimento", "in_progress", "atendido")
+    if ticket_status and ticket_status not in ALLOWED_TICKET_STATUSES:
+        # Log e ignora — mas só se bater alguma keyword bloqueada OU se o campo veio
+        # com valor conhecido diferente dos permitidos.
+        if any(kw in ticket_status for kw in BLOCKED_KEYWORDS) or ticket_status not in ("",):
+            logger.info(
+                f"[Webhook {agent_id}] ignorado: ticket_status='{ticket_status}' fora da lista "
+                f"de permitidos={sorted(ALLOWED_TICKET_STATUSES)}"
+            )
+            return {
+                "status": "ignored",
+                "reason": f"Ticket em status '{ticket_status}' — agente só atua em tickets pendentes",
+            }
+
+    # Se o ticket tem um operador humano atribuído, o bot NÃO responde.
+    # Alguns CRMs enviam user_id / assignedTo quando um humano pega o ticket.
+    assigned_user_id = (
+        ticket_obj.get("userId")
+        or ticket_obj.get("user_id")
+        or ticket_obj.get("assignedTo")
+        or ticket_obj.get("assigned_to")
+        or (ticket_obj.get("user") or {}).get("id") if isinstance(ticket_obj.get("user"), dict) else None
+        or data_wrap.get("userId")
+        or data_wrap.get("user_id")
+    )
+    # Opt-in: se o agente tiver "ignore_assigned_tickets": true (ou por default config),
+    # ignora tickets com operador atribuído. Default True para segurança.
+    ignore_assigned = agent.get("webhook_ignore_assigned", True)
+    if ignore_assigned and assigned_user_id and str(assigned_user_id) not in ("0", "None", "null", ""):
+        logger.info(
+            f"[Webhook {agent_id}] ignorado: ticket_id={ticket_obj.get('id') or '?'} "
+            f"atribuído ao operador user_id={assigned_user_id}"
+        )
+        return {
+            "status": "ignored",
+            "reason": "Ticket atribuído a operador humano — agente não atua (desligue webhook_ignore_assigned para forçar)",
+        }
+    # ──────────────────────────────────────────────────────────────────────────
+
     # --- user_input ---
     user_input = (
         msg_obj.get("body")
@@ -1668,19 +1881,29 @@ async def webhook_trigger(
 
     if ticket_id_for_reply:
         reply_instruction = (
-            f"INSTRUÇÃO OBRIGATÓRIA: Use a ferramenta 'enviar_mensagem_direta' com "
-            f"ticket_id={ticket_id_for_reply} para enviar sua resposta ao lead no CRM."
+            f"INSTRUÇÃO OBRIGATÓRIA E IMUTÁVEL:\n"
+            f"- Use 'enviar_mensagem_direta' com ticket_id=\"{ticket_id_for_reply}\" para responder.\n"
+            f"- NÃO altere o ticket_id. NÃO liste outros tickets. NÃO busque contatos.\n"
+            f"- Se você passar outro ticket_id, a chamada será rejeitada pelo sistema."
         )
     elif contact_number_for_reply:
         reply_instruction = (
-            f"INSTRUÇÃO OBRIGATÓRIA: Use a ferramenta 'enviar_mensagem' com "
-            f"numero={contact_number_for_reply} para enviar sua resposta ao lead no CRM."
+            f"INSTRUÇÃO OBRIGATÓRIA E IMUTÁVEL:\n"
+            f"- Use 'enviar_mensagem' com numero=\"{contact_number_for_reply}\" para responder.\n"
+            f"- NÃO altere o número. NÃO liste outros tickets. NÃO busque contatos.\n"
+            f"- Se você passar outro número, a chamada será rejeitada pelo sistema."
         )
     else:
-        reply_instruction = (
-            "INSTRUÇÃO OBRIGATÓRIA: Chame listar_tickets_pendentes para encontrar o ticket "
-            "deste lead e use enviar_mensagem_direta para responder."
+        # Sem ticket_id nem número → não dá para enfileirar com segurança.
+        # Logar e ignorar: preferir silêncio a responder em ticket errado.
+        logger.warning(
+            f"[Webhook {agent_id}] ignorado: payload não tem ticket_id nem contact_number. "
+            f"Sem destinatário seguro para responder."
         )
+        return {
+            "status": "ignored",
+            "reason": "Payload sem ticket_id nem contact_number — destinatário indeterminado",
+        }
 
     user_input = (
         f"[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]\n"
@@ -1713,10 +1936,14 @@ async def webhook_trigger(
             # webhook_mode=True: remove ferramentas de busca de histórico e força
             # tool_choice=required. original_input_for_history salva apenas a mensagem
             # limpa do lead no histórico, não o envelope de instrução do webhook.
+            # allowed_ticket_id/allowed_numero ativam o TICKET SCOPE LOCK: se o LLM
+            # tentar enviar para outro ticket/número, a chamada é rejeitada.
             output, steps = await execute_agent(
                 agent, user_input, workspace_creds, db=db, session_id=session_id,
                 max_iterations=3, webhook_mode=True,
                 original_input_for_history=original_input,
+                allowed_ticket_id=str(ticket_id_for_reply or ""),
+                allowed_numero=str(contact_number_for_reply or ""),
             )
 
             # Fallback automático: se o agente gerou texto mas não chamou enviar_mensagem,
