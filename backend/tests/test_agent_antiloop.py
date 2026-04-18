@@ -240,20 +240,21 @@ def test_webhook_blocks_ticket_listing_tools():
 
 def test_enforce_ticket_scope_accepts_matching_ticket():
     from agents import _enforce_ticket_scope
-    params, err = _enforce_ticket_scope(
+    fn, params, err = _enforce_ticket_scope(
         "enviar_mensagem_direta",
-        {"ticket_id": "66378", "mensagem": "oi"},
+        {"ticket_id": "66378", "numero": "5511988887777", "mensagem": "oi"},
         allowed_ticket_id="66378", allowed_numero="5511988887777",
     )
     assert err is None
     assert params["ticket_id"] == "66378"
+    assert fn == "enviar_mensagem_direta"  # não reescreve — número está presente
 
 
 def test_enforce_ticket_scope_rejects_mismatched_ticket():
     from agents import _enforce_ticket_scope
-    _, err = _enforce_ticket_scope(
+    _, _, err = _enforce_ticket_scope(
         "enviar_mensagem_direta",
-        {"ticket_id": "99999", "mensagem": "oi"},  # ticket errado
+        {"ticket_id": "99999", "numero": "5511988887777", "mensagem": "oi"},
         allowed_ticket_id="66378", allowed_numero="",
     )
     assert err is not None
@@ -263,7 +264,7 @@ def test_enforce_ticket_scope_rejects_mismatched_ticket():
 
 def test_enforce_ticket_scope_rejects_mismatched_numero():
     from agents import _enforce_ticket_scope
-    _, err = _enforce_ticket_scope(
+    _, _, err = _enforce_ticket_scope(
         "enviar_mensagem",
         {"numero": "5511000000000", "mensagem": "oi"},
         allowed_ticket_id="", allowed_numero="5511988887777",
@@ -275,48 +276,97 @@ def test_enforce_ticket_scope_rejects_mismatched_numero():
 def test_enforce_ticket_scope_injects_missing_ticket_id():
     """Se o LLM esquecer o ticket_id, o scope lock injeta o correto."""
     from agents import _enforce_ticket_scope
-    params, err = _enforce_ticket_scope(
-        "enviar_mensagem_direta",
+    fn, params, err = _enforce_ticket_scope(
+        "enviar_nota_interna",
         {"mensagem": "oi"},  # sem ticket_id
         allowed_ticket_id="66378", allowed_numero="",
     )
     assert err is None
     assert params["ticket_id"] == "66378"
+    assert fn == "enviar_nota_interna"
 
 
 def test_enforce_ticket_scope_injects_missing_numero():
     from agents import _enforce_ticket_scope
-    params, err = _enforce_ticket_scope(
+    fn, params, err = _enforce_ticket_scope(
         "enviar_mensagem",
         {"mensagem": "oi"},  # sem numero
         allowed_ticket_id="", allowed_numero="5511988887777",
     )
     assert err is None
     assert params["numero"] == "5511988887777"
+    assert fn == "enviar_mensagem"
 
 
 def test_enforce_ticket_scope_passes_through_non_scoped_tools():
     """Tools que não são de envio passam inalteradas."""
     from agents import _enforce_ticket_scope
-    params, err = _enforce_ticket_scope(
+    fn, params, err = _enforce_ticket_scope(
         "buscar_mensagens_ticket",
         {"ticket_id": "99999"},
         allowed_ticket_id="66378", allowed_numero="",
     )
     assert err is None
     assert params["ticket_id"] == "99999"  # não alterado
+    assert fn == "buscar_mensagens_ticket"
 
 
 def test_enforce_ticket_scope_mcp_namespaced():
     """Prefixo clickmassa__ deve ser reconhecido."""
     from agents import _enforce_ticket_scope
-    _, err = _enforce_ticket_scope(
+    _, _, err = _enforce_ticket_scope(
         "clickmassa__enviar_mensagem_direta",
-        {"ticket_id": "99999"},
+        {"ticket_id": "99999", "numero": "5511988887777"},
         allowed_ticket_id="66378", allowed_numero="",
     )
     assert err is not None
     assert err.get("scope_violation") is True
+
+
+def test_enforce_ticket_scope_rewrites_enviar_mensagem_direta_without_numero():
+    """
+    REGRESSION: O ClickMassa respondeu "Olá! Tudo bem?..." mas não chegou no
+    WhatsApp do lead porque o LLM chamou enviar_mensagem_direta com numero="".
+    Agora o scope lock converte essa chamada para enviar_mensagem (usa ticket_id),
+    garantindo que a mensagem chegue no WhatsApp.
+    """
+    from agents import _enforce_ticket_scope
+    fn, params, err = _enforce_ticket_scope(
+        "enviar_mensagem_direta",
+        {"numero": "", "ticket_id": "66397", "mensagem": "Olá"},
+        allowed_ticket_id="66397", allowed_numero="",
+    )
+    assert err is None
+    assert fn == "enviar_mensagem", f"esperado reescrita para enviar_mensagem, veio '{fn}'"
+    assert params["ticket_id"] == "66397"
+    assert "numero" not in params  # número vazio foi removido
+    assert params["mensagem"] == "Olá"
+
+
+def test_enforce_ticket_scope_rewrites_mcp_namespaced_direta():
+    """Idem acima, com prefixo clickmassa__."""
+    from agents import _enforce_ticket_scope
+    fn, params, err = _enforce_ticket_scope(
+        "clickmassa__enviar_mensagem_direta",
+        {"numero": "", "ticket_id": "66397", "mensagem": "Olá"},
+        allowed_ticket_id="66397", allowed_numero="",
+    )
+    assert err is None
+    assert fn == "clickmassa__enviar_mensagem"
+    assert params["ticket_id"] == "66397"
+
+
+def test_enforce_ticket_scope_keeps_direta_when_numero_valid():
+    """Se o número é válido e bate com allowed_numero, não reescreve."""
+    from agents import _enforce_ticket_scope
+    fn, params, err = _enforce_ticket_scope(
+        "enviar_mensagem_direta",
+        {"numero": "5511988887777", "mensagem": "oi"},
+        allowed_ticket_id="66397", allowed_numero="5511988887777",
+    )
+    assert err is None
+    assert fn == "enviar_mensagem_direta"
+    assert params["numero"] == "5511988887777"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -477,3 +527,51 @@ def test_extract_webhook_fields_notification_is_private():
     payload = {"message": {"body": "status update"}, "messageType": "notification"}
     fields = _extract_webhook_fields(payload)
     assert fields["is_private"] is True
+
+
+def test_extract_webhook_fields_clickmassa_nested_ticket():
+    """
+    REGRESSION: O ClickMassa aninha o TICKET COMPLETO (com contact.number,
+    status, etc.) dentro de payload.message.ticket. Sem esse path, o número
+    do lead nunca é extraído e a mensagem vai pro limbo.
+
+    Payload abaixo é recorte fiel do log de produção 2026-04-18 20:25.
+    """
+    from agents import _extract_webhook_fields
+
+    payload = {
+        "message": {
+            "body": "Oi",
+            "fromMe": False,
+            "ticketId": 66397,
+            "contactId": 71890,
+            "id": "4899563a-2acb-491c-b0b6-30708dbb36e1",
+            "ticket": {
+                "id": 66397,
+                "status": "pending",
+                "userId": None,
+                "contactId": 71890,
+                "contact": {
+                    "id": 71890,
+                    "name": "Yago Rodrigues",
+                    "number": "553196827334",
+                    "channel": "whatsapp",
+                },
+                "user": None,
+            },
+        },
+        "tenantId": 27,
+        "event": "NewMessage",
+    }
+
+    fields = _extract_webhook_fields(payload)
+
+    assert fields["user_input"] == "Oi"
+    assert fields["ticket_id"] == "66397"
+    assert fields["contact_number"] == "553196827334", (
+        f"contact_number deveria vir de ticket.contact.number, veio '{fields['contact_number']}'"
+    )
+    assert fields["contact_name"] == "Yago Rodrigues"
+    assert fields["contact_id"] == "71890"
+    assert fields["ticket_status"] == "pending"
+    assert fields["from_me"] is False

@@ -166,29 +166,34 @@ def _enforce_ticket_scope(
 ) -> tuple:
     """
     Em webhook_mode, valida que tools de envio/ação só operam no ticket/número
-    que disparou o webhook. Retorna (params_ajustados, erro_dict_ou_None).
+    que disparou o webhook. Retorna (fn_name_final, params_ajustados, erro_dict_ou_None).
 
     Comportamento:
       - Se params traz ticket_id diferente do esperado → retorna erro (blocked).
       - Se params traz numero/phone diferente do esperado → retorna erro.
       - Se não trouxer, injeta o valor correto (LLM às vezes esquece).
+      - enviar_mensagem_direta SEM número válido → converte para enviar_mensagem
+        (que usa apenas ticket_id), evitando que a mensagem vá pro limbo (como
+        aconteceu em produção 2026-04-18: LLM chamou enviar_mensagem_direta com
+        numero="" e a mensagem nunca chegou no WhatsApp do lead).
       - Tools que não são de envio passam inalteradas.
     """
     bare = fn_name.split("__", 1)[1] if "__" in (fn_name or "") else (fn_name or "")
+    prefix = fn_name.split("__", 1)[0] + "__" if "__" in (fn_name or "") else ""
     # Tools sensíveis ao escopo do ticket (qualquer uma que aceita ticket_id ou numero)
     scoped_tools = {
         "enviar_mensagem", "enviar_mensagem_direta", "enviar_midia",
         "enviar_nota_interna", "fechar_ticket", "devolver_para_fila",
     }
     if bare not in scoped_tools:
-        return params, None
+        return fn_name, params, None
 
     out = dict(params or {})
 
     if allowed_ticket_id:
         provided_tid = str(out.get("ticket_id") or "").strip()
         if provided_tid and provided_tid != str(allowed_ticket_id):
-            return out, {
+            return fn_name, out, {
                 "error": (
                     f"TICKET FORA DE ESCOPO: você tentou operar no ticket_id={provided_tid}, "
                     f"mas o webhook só permite responder no ticket_id={allowed_ticket_id}. "
@@ -197,14 +202,14 @@ def _enforce_ticket_scope(
                 "blocked": True,
                 "scope_violation": True,
             }
-        if not provided_tid and bare in {"enviar_mensagem_direta", "enviar_nota_interna", "fechar_ticket", "devolver_para_fila"}:
+        if not provided_tid:
             out["ticket_id"] = str(allowed_ticket_id)
 
     if allowed_numero:
         for key in ("numero", "number", "phone", "phone_number"):
             provided_num = str(out.get(key) or "").strip()
             if provided_num and provided_num != str(allowed_numero):
-                return out, {
+                return fn_name, out, {
                     "error": (
                         f"NÚMERO FORA DE ESCOPO: você tentou enviar para {key}={provided_num}, "
                         f"mas o webhook só permite responder ao número {allowed_numero}. "
@@ -216,7 +221,23 @@ def _enforce_ticket_scope(
         if bare == "enviar_mensagem" and not any(out.get(k) for k in ("numero", "number", "phone", "phone_number")):
             out["numero"] = str(allowed_numero)
 
-    return out, None
+    # ──────────────────────────────────────────────────────────────────────────
+    # SALVA-VIDAS: se LLM chamou enviar_mensagem_direta mas não temos número,
+    # converte para enviar_mensagem (que usa ticket_id). Isso garante que a
+    # mensagem SEMPRE chegue no WhatsApp do lead, mesmo se o LLM escolheu
+    # a tool errada e o payload do webhook não trouxe o número do contato.
+    # ──────────────────────────────────────────────────────────────────────────
+    if bare == "enviar_mensagem_direta":
+        has_numero = any(str(out.get(k) or "").strip() for k in ("numero", "number", "phone", "phone_number"))
+        if not has_numero and allowed_ticket_id:
+            # Remove qualquer chave de número vazia que possa confundir o MCP
+            for k in ("numero", "number", "phone", "phone_number"):
+                out.pop(k, None)
+            out["ticket_id"] = str(allowed_ticket_id)
+            new_fn = f"{prefix}enviar_mensagem" if prefix else "enviar_mensagem"
+            return new_fn, out, None
+
+    return fn_name, out, None
 
 
 def _extract_webhook_fields(payload: dict) -> dict:
@@ -238,19 +259,25 @@ def _extract_webhook_fields(payload: dict) -> dict:
     msg_obj = payload.get("message") or data_wrap.get("message") or {}
     if not isinstance(msg_obj, dict):
         msg_obj = {}
+    # ClickMassa ANINHA o ticket completo (com contato e status) dentro de
+    # payload.message.ticket. Procurar lá primeiro, depois os formatos antigos.
     ticket_obj = (
-        payload.get("ticket")
+        msg_obj.get("ticket")              # ← ClickMassa (caminho principal)
+        or payload.get("ticket")
         or data_wrap.get("ticket")
         or data_wrap.get("conversation")
         or {}
     )
     if not isinstance(ticket_obj, dict):
         ticket_obj = {}
+    # O contato também vem em ticket.contact (ClickMassa) — isso dá o número
+    # do WhatsApp do lead, que é OBRIGATÓRIO para enviar_mensagem_direta.
     contact_obj = (
-        payload.get("contact")
+        ticket_obj.get("contact")          # ← ClickMassa (ticket.contact.number)
+        or payload.get("contact")
         or data_wrap.get("contact")
         or data_wrap.get("sender")
-        or ticket_obj.get("contact")
+        or msg_obj.get("contact")
         or {}
     )
     if not isinstance(contact_obj, dict):
@@ -1519,8 +1546,10 @@ async def execute_agent(
                 # TICKET SCOPE LOCK — em webhook_mode, valida que o LLM não está
                 # tentando enviar para outro ticket/número. Se tentar, a chamada
                 # é REJEITADA e o LLM recebe um tool_result de erro → para.
+                # Também pode converter enviar_mensagem_direta (sem número) em
+                # enviar_mensagem (com ticket_id), devolvendo um fn_name novo.
                 if webhook_mode and (allowed_ticket_id or allowed_numero):
-                    params, scope_err = _enforce_ticket_scope(
+                    new_fn_name, params, scope_err = _enforce_ticket_scope(
                         fn_name, params, allowed_ticket_id, allowed_numero
                     )
                     if scope_err:
@@ -1542,6 +1571,18 @@ async def execute_agent(
                             "tool_call_id": tc.id,
                         })
                         continue
+                    # Se a tool foi reescrita (ex: enviar_mensagem_direta → enviar_mensagem),
+                    # atualiza fn_name/tool_name para o execute_tool usar o nome correto.
+                    if new_fn_name != fn_name:
+                        logger.info(
+                            f"[execute_agent webhook_mode] tool reescrita: {fn_name} → {new_fn_name} "
+                            f"(numero vazio + ticket_id={allowed_ticket_id})"
+                        )
+                        fn_name = new_fn_name
+                        if "__" in fn_name:
+                            mcp_id, tool_name = fn_name.split("__", 1)
+                        else:
+                            tool_name = fn_name
 
                 creds = workspace_creds.get(mcp_id, {})
                 result = await execute_tool(mcp_id, tool_name, params, creds)
@@ -1766,53 +1807,18 @@ async def webhook_trigger(
     logger.info(f"[Webhook {agent_id}] payload keys={list(payload.keys())}")
     logger.info(f"[Webhook {agent_id}] payload={json.dumps(payload, ensure_ascii=False)[:800]}")
 
-    # 3. Extrai todos os campos tentando múltiplos caminhos (qualquer formato de CRM)
-    # Normaliza: alguns CRMs envolvem tudo em "data"
-    data_wrap = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
-    msg_obj   = payload.get("message", data_wrap.get("message", {})) or {}
-    ticket_obj = payload.get("ticket", data_wrap.get("ticket", data_wrap.get("conversation", {}))) or {}
-    contact_obj = (
-        payload.get("contact")
-        or data_wrap.get("contact")
-        or data_wrap.get("sender")
-        or ticket_obj.get("contact")
-        or {}
-    )
-
-    # --- from_me: verifica por TODOS os campos possíveis ---
-    sender_obj = data_wrap.get("sender", {}) if isinstance(data_wrap.get("sender"), dict) else {}
-    sender_type = (
-        sender_obj.get("type", "")
-        or payload.get("senderType", "")
-        or payload.get("authorType", "")
-        or ""
-    )
-    from_me = bool(
-        payload.get("fromMe")
-        or msg_obj.get("fromMe")
-        or data_wrap.get("fromMe")
-        or (data_wrap.get("message_type") in ("outgoing", 1))
-        or (str(data_wrap.get("message_type", "")).lower() == "outgoing")
-        or (str(sender_type).lower() in ("agent", "agent_bot", "bot", "system"))
-        or payload.get("isFromBot")
-        or payload.get("isBot")
-    )
-
-    # --- is_private / notification ---
-    is_private = bool(
-        payload.get("isPrivate")
-        or msg_obj.get("isPrivate")
-        or data_wrap.get("private")
-    )
-    msg_type = (
-        payload.get("messageType")
-        or msg_obj.get("messageType")
-        or msg_obj.get("type")
-        or data_wrap.get("message_type")
-        or "chat"
-    )
-    if str(msg_type).lower() == "notification":
-        is_private = True
+    # 3. Extrai todos os campos via função pura testada (_extract_webhook_fields).
+    # Essa função conhece os formatos do ClickMassa (ticket aninhado em
+    # payload.message.ticket), Chatwoot (payload.data.conversation) e payloads
+    # planos — centralizando toda a lógica de normalização em um só lugar.
+    fields = _extract_webhook_fields(payload)
+    data_wrap       = fields["data_wrap"]
+    msg_obj         = fields["msg_obj"]
+    ticket_obj      = fields["ticket_obj"]
+    from_me         = fields["from_me"]
+    is_private      = fields["is_private"]
+    msg_type        = fields["msg_type"]
+    sender_type     = fields["sender_type"]
 
     logger.info(f"[Webhook {agent_id}] filtros: from_me={from_me} is_private={is_private} msg_type={msg_type} sender_type={sender_type}")
 
@@ -1845,15 +1851,9 @@ async def webhook_trigger(
     if isinstance(agent_blocked, list) and agent_blocked:
         BLOCKED_TICKET_STATUSES = {str(s).lower() for s in agent_blocked if s}
 
-    ticket_status_raw = (
-        ticket_obj.get("status")
-        or ticket_obj.get("state")
-        or data_wrap.get("status")
-        or payload.get("ticketStatus")
-        or payload.get("status")
-        or ""
-    )
-    ticket_status = str(ticket_status_raw).strip().lower()
+    ticket_status = fields["ticket_status"] or str(
+        payload.get("ticketStatus") or payload.get("status") or ""
+    ).strip().lower()
 
     logger.info(
         f"[Webhook {agent_id}] gate: ticket_status='{ticket_status}' "
@@ -1900,70 +1900,16 @@ async def webhook_trigger(
             }
     # ──────────────────────────────────────────────────────────────────────────
 
-    # --- user_input ---
-    user_input = (
-        msg_obj.get("body")
-        or payload.get("body")
-        or data_wrap.get("content")
-        or data_wrap.get("body")
-        or payload.get("text")
-        or data_wrap.get("text")
-        or payload.get("input")
-        or ""
-    )
-    if isinstance(user_input, str):
-        user_input = user_input.strip()
+    # Campos extraídos pela função pura _extract_webhook_fields (ver topo)
+    user_input     = fields["user_input"]
+    ticket_id      = fields["ticket_id"]
+    contact_number = fields["contact_number"]
+    contact_name   = fields["contact_name"]
+    contact_id     = fields["contact_id"]
 
     if not user_input:
         logger.info(f"[Webhook {agent_id}] ignorado: sem conteúdo de mensagem no payload")
         return {"status": "ignored", "reason": "Nenhum conteúdo de mensagem encontrado no payload"}
-
-    # --- ticket_id ---
-    # ClickMassa manda ticketId ANINHADO em payload["message"]["ticketId"].
-    # Outros CRMs usam payload.ticketId, payload.ticket.id, etc.
-    _conv = data_wrap.get("conversation") if isinstance(data_wrap.get("conversation"), dict) else {}
-    raw_ticket_id = (
-        msg_obj.get("ticketId")          # ← ClickMassa (caminho principal)
-        or msg_obj.get("ticket_id")
-        or payload.get("ticketId")
-        or payload.get("ticket_id")
-        or ticket_obj.get("id")
-        or _conv.get("id")
-        or data_wrap.get("ticketId")
-        or data_wrap.get("ticket_id")
-    )
-    ticket_id = str(raw_ticket_id) if raw_ticket_id is not None else ""
-    if ticket_id in ("None", "null", "0", ""):
-        ticket_id = ""
-
-    # --- contact info ---
-    # ClickMassa não manda o número do contato no payload inicial — apenas contactId.
-    # O agente responde via enviar_mensagem(ticket_id=...), então número vazio é OK.
-    _sender = data_wrap.get("sender") if isinstance(data_wrap.get("sender"), dict) else {}
-    contact_number = str(
-        contact_obj.get("number")
-        or contact_obj.get("phone")
-        or contact_obj.get("phone_number")
-        or msg_obj.get("number")
-        or msg_obj.get("phone")
-        or payload.get("contactNumber")
-        or payload.get("numero")
-        or _sender.get("phone_number")
-        or ""
-    ).strip()
-    contact_name = str(
-        contact_obj.get("name")
-        or msg_obj.get("contactName")
-        or payload.get("contactName")
-        or _sender.get("name")
-        or ""
-    ).strip()
-    contact_id = str(
-        contact_obj.get("id")
-        or msg_obj.get("contactId")      # ← ClickMassa
-        or payload.get("contactId")
-        or ""
-    )
 
     logger.info(f"[Webhook {agent_id}] extraído: input='{user_input[:60]}' ticket_id='{ticket_id}' contact_number='{contact_number}' contact_name='{contact_name}'")
 
@@ -1982,13 +1928,7 @@ async def webhook_trigger(
 
     # ── PROTEÇÃO ANTI-LOOP ─────────────────────────────────────────────────────
     # Camada 1: deduplicação por ID da mensagem
-    msg_id = str(
-        msg_obj.get("id")
-        or payload.get("messageId")
-        or payload.get("id")
-        or data_wrap.get("id")
-        or ""
-    ).strip()
+    msg_id = fields["msg_id"]
     if msg_id:
         already = await db.webhook_dedup.find_one({"msg_id": msg_id, "agent_id": agent_id})
         if already:
