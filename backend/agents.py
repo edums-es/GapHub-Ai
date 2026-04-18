@@ -219,6 +219,167 @@ def _enforce_ticket_scope(
     return out, None
 
 
+def _extract_webhook_fields(payload: dict) -> dict:
+    """
+    Extrai os campos relevantes do payload do webhook — normalizando entre formatos
+    de CRMs diferentes. Função pura (sem side effects) para ser testável.
+
+    Fontes suportadas:
+      - ClickMassa: dados aninhados em payload["message"] (ticketId, contactId, body, fromMe).
+      - Chatwoot: dados em payload["data"] (conversation, sender, content).
+      - Payloads planos: campos direto no root do payload.
+
+    Retorna dict com: user_input, ticket_id, contact_number, contact_name,
+    contact_id, from_me, is_private, msg_type, msg_id, ticket_status,
+    ticket_obj, data_wrap, msg_obj.
+    """
+    payload = payload or {}
+    data_wrap = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    msg_obj = payload.get("message") or data_wrap.get("message") or {}
+    if not isinstance(msg_obj, dict):
+        msg_obj = {}
+    ticket_obj = (
+        payload.get("ticket")
+        or data_wrap.get("ticket")
+        or data_wrap.get("conversation")
+        or {}
+    )
+    if not isinstance(ticket_obj, dict):
+        ticket_obj = {}
+    contact_obj = (
+        payload.get("contact")
+        or data_wrap.get("contact")
+        or data_wrap.get("sender")
+        or ticket_obj.get("contact")
+        or {}
+    )
+    if not isinstance(contact_obj, dict):
+        contact_obj = {}
+
+    # from_me
+    sender_obj = data_wrap.get("sender") if isinstance(data_wrap.get("sender"), dict) else {}
+    sender_type = (
+        sender_obj.get("type", "")
+        or payload.get("senderType", "")
+        or payload.get("authorType", "")
+        or ""
+    )
+    from_me = bool(
+        payload.get("fromMe")
+        or msg_obj.get("fromMe")
+        or data_wrap.get("fromMe")
+        or (data_wrap.get("message_type") in ("outgoing", 1))
+        or (str(data_wrap.get("message_type", "")).lower() == "outgoing")
+        or (str(sender_type).lower() in ("agent", "agent_bot", "bot", "system"))
+        or payload.get("isFromBot")
+        or payload.get("isBot")
+    )
+    is_private = bool(
+        payload.get("isPrivate")
+        or msg_obj.get("isPrivate")
+        or data_wrap.get("private")
+    )
+    msg_type = (
+        payload.get("messageType")
+        or msg_obj.get("messageType")
+        or msg_obj.get("type")
+        or data_wrap.get("message_type")
+        or "chat"
+    )
+    if str(msg_type).lower() == "notification":
+        is_private = True
+
+    # user_input
+    user_input = (
+        msg_obj.get("body")
+        or payload.get("body")
+        or data_wrap.get("content")
+        or data_wrap.get("body")
+        or payload.get("text")
+        or data_wrap.get("text")
+        or payload.get("input")
+        or ""
+    )
+    if isinstance(user_input, str):
+        user_input = user_input.strip()
+
+    # ticket_id — ClickMassa aninha dentro de message
+    raw_ticket_id = (
+        msg_obj.get("ticketId")
+        or msg_obj.get("ticket_id")
+        or payload.get("ticketId")
+        or payload.get("ticket_id")
+        or ticket_obj.get("id")
+        or data_wrap.get("ticketId")
+        or data_wrap.get("ticket_id")
+    )
+    ticket_id = str(raw_ticket_id) if raw_ticket_id is not None else ""
+    if ticket_id in ("None", "null", "0", ""):
+        ticket_id = ""
+
+    # contact info
+    contact_number = str(
+        contact_obj.get("number")
+        or contact_obj.get("phone")
+        or contact_obj.get("phone_number")
+        or msg_obj.get("number")
+        or msg_obj.get("phone")
+        or payload.get("contactNumber")
+        or payload.get("numero")
+        or sender_obj.get("phone_number")
+        or ""
+    ).strip()
+    contact_name = str(
+        contact_obj.get("name")
+        or msg_obj.get("contactName")
+        or payload.get("contactName")
+        or sender_obj.get("name")
+        or ""
+    ).strip()
+    contact_id = str(
+        contact_obj.get("id")
+        or msg_obj.get("contactId")
+        or payload.get("contactId")
+        or ""
+    )
+
+    # msg_id
+    msg_id = str(
+        msg_obj.get("id")
+        or payload.get("messageId")
+        or payload.get("id")
+        or data_wrap.get("id")
+        or ""
+    ).strip()
+
+    # ticket_status — várias fontes
+    _ticket_user = ticket_obj.get("user") if isinstance(ticket_obj.get("user"), dict) else {}
+    ticket_status = str(
+        ticket_obj.get("status")
+        or ticket_obj.get("state")
+        or data_wrap.get("status")
+        or ""
+    ).strip().lower()
+
+    return {
+        "user_input": user_input,
+        "ticket_id": ticket_id,
+        "contact_number": contact_number,
+        "contact_name": contact_name,
+        "contact_id": contact_id,
+        "from_me": from_me,
+        "is_private": is_private,
+        "msg_type": msg_type,
+        "sender_type": sender_type,
+        "msg_id": msg_id,
+        "ticket_status": ticket_status,
+        "ticket_obj": ticket_obj,
+        "data_wrap": data_wrap,
+        "msg_obj": msg_obj,
+        "_ticket_user": _ticket_user,
+    }
+
+
 _WEBHOOK_PREFIX_RE = re.compile(
     r"^\[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA\]\s*\n"
     r"Mensagem recebida do lead via CRM:\s*\n\"(.*?)\"",
@@ -1758,11 +1919,17 @@ async def webhook_trigger(
         return {"status": "ignored", "reason": "Nenhum conteúdo de mensagem encontrado no payload"}
 
     # --- ticket_id ---
+    # ClickMassa manda ticketId ANINHADO em payload["message"]["ticketId"].
+    # Outros CRMs usam payload.ticketId, payload.ticket.id, etc.
+    _conv = data_wrap.get("conversation") if isinstance(data_wrap.get("conversation"), dict) else {}
     raw_ticket_id = (
-        payload.get("ticketId")
-        or ticket_obj.get("id")
-        or data_wrap.get("conversation", {}).get("id") if isinstance(data_wrap.get("conversation"), dict) else None
+        msg_obj.get("ticketId")          # ← ClickMassa (caminho principal)
+        or msg_obj.get("ticket_id")
+        or payload.get("ticketId")
         or payload.get("ticket_id")
+        or ticket_obj.get("id")
+        or _conv.get("id")
+        or data_wrap.get("ticketId")
         or data_wrap.get("ticket_id")
     )
     ticket_id = str(raw_ticket_id) if raw_ticket_id is not None else ""
@@ -1770,22 +1937,33 @@ async def webhook_trigger(
         ticket_id = ""
 
     # --- contact info ---
+    # ClickMassa não manda o número do contato no payload inicial — apenas contactId.
+    # O agente responde via enviar_mensagem(ticket_id=...), então número vazio é OK.
+    _sender = data_wrap.get("sender") if isinstance(data_wrap.get("sender"), dict) else {}
     contact_number = str(
         contact_obj.get("number")
         or contact_obj.get("phone")
         or contact_obj.get("phone_number")
+        or msg_obj.get("number")
+        or msg_obj.get("phone")
         or payload.get("contactNumber")
         or payload.get("numero")
-        or data_wrap.get("sender", {}).get("phone_number") if isinstance(data_wrap.get("sender"), dict) else None
+        or _sender.get("phone_number")
         or ""
     ).strip()
     contact_name = str(
         contact_obj.get("name")
+        or msg_obj.get("contactName")
         or payload.get("contactName")
-        or data_wrap.get("sender", {}).get("name") if isinstance(data_wrap.get("sender"), dict) else None
+        or _sender.get("name")
         or ""
     ).strip()
-    contact_id = str(contact_obj.get("id") or payload.get("contactId") or "")
+    contact_id = str(
+        contact_obj.get("id")
+        or msg_obj.get("contactId")      # ← ClickMassa
+        or payload.get("contactId")
+        or ""
+    )
 
     logger.info(f"[Webhook {agent_id}] extraído: input='{user_input[:60]}' ticket_id='{ticket_id}' contact_number='{contact_number}' contact_name='{contact_name}'")
 

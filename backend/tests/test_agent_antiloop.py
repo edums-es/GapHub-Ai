@@ -220,3 +220,260 @@ def test_webhook_blocks_history_search_tools():
     from agents import WEBHOOK_BLOCKED_TOOLS
     assert "buscar_mensagens_ticket" in WEBHOOK_BLOCKED_TOOLS
     assert "clickmassa__buscar_mensagens_ticket" in WEBHOOK_BLOCKED_TOOLS
+
+
+def test_webhook_blocks_ticket_listing_tools():
+    """Tools que fazem o agente ver OUTROS tickets devem estar bloqueadas."""
+    from agents import WEBHOOK_BLOCKED_TOOLS
+    for t in [
+        "listar_tickets_abertos", "listar_tickets_pendentes", "listar_tickets",
+        "buscar_tickets", "buscar_ticket_por_id",
+        "buscar_contato_por_numero", "buscar_contato_por_id", "listar_contatos",
+    ]:
+        assert t in WEBHOOK_BLOCKED_TOOLS, f"{t} deveria estar bloqueada em webhook"
+        assert f"clickmassa__{t}" in WEBHOOK_BLOCKED_TOOLS, f"clickmassa__{t} deveria estar bloqueada"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _enforce_ticket_scope — rejeita envio para ticket/número errado
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_enforce_ticket_scope_accepts_matching_ticket():
+    from agents import _enforce_ticket_scope
+    params, err = _enforce_ticket_scope(
+        "enviar_mensagem_direta",
+        {"ticket_id": "66378", "mensagem": "oi"},
+        allowed_ticket_id="66378", allowed_numero="5511988887777",
+    )
+    assert err is None
+    assert params["ticket_id"] == "66378"
+
+
+def test_enforce_ticket_scope_rejects_mismatched_ticket():
+    from agents import _enforce_ticket_scope
+    _, err = _enforce_ticket_scope(
+        "enviar_mensagem_direta",
+        {"ticket_id": "99999", "mensagem": "oi"},  # ticket errado
+        allowed_ticket_id="66378", allowed_numero="",
+    )
+    assert err is not None
+    assert err.get("blocked") is True
+    assert err.get("scope_violation") is True
+
+
+def test_enforce_ticket_scope_rejects_mismatched_numero():
+    from agents import _enforce_ticket_scope
+    _, err = _enforce_ticket_scope(
+        "enviar_mensagem",
+        {"numero": "5511000000000", "mensagem": "oi"},
+        allowed_ticket_id="", allowed_numero="5511988887777",
+    )
+    assert err is not None
+    assert err.get("blocked") is True
+
+
+def test_enforce_ticket_scope_injects_missing_ticket_id():
+    """Se o LLM esquecer o ticket_id, o scope lock injeta o correto."""
+    from agents import _enforce_ticket_scope
+    params, err = _enforce_ticket_scope(
+        "enviar_mensagem_direta",
+        {"mensagem": "oi"},  # sem ticket_id
+        allowed_ticket_id="66378", allowed_numero="",
+    )
+    assert err is None
+    assert params["ticket_id"] == "66378"
+
+
+def test_enforce_ticket_scope_injects_missing_numero():
+    from agents import _enforce_ticket_scope
+    params, err = _enforce_ticket_scope(
+        "enviar_mensagem",
+        {"mensagem": "oi"},  # sem numero
+        allowed_ticket_id="", allowed_numero="5511988887777",
+    )
+    assert err is None
+    assert params["numero"] == "5511988887777"
+
+
+def test_enforce_ticket_scope_passes_through_non_scoped_tools():
+    """Tools que não são de envio passam inalteradas."""
+    from agents import _enforce_ticket_scope
+    params, err = _enforce_ticket_scope(
+        "buscar_mensagens_ticket",
+        {"ticket_id": "99999"},
+        allowed_ticket_id="66378", allowed_numero="",
+    )
+    assert err is None
+    assert params["ticket_id"] == "99999"  # não alterado
+
+
+def test_enforce_ticket_scope_mcp_namespaced():
+    """Prefixo clickmassa__ deve ser reconhecido."""
+    from agents import _enforce_ticket_scope
+    _, err = _enforce_ticket_scope(
+        "clickmassa__enviar_mensagem_direta",
+        {"ticket_id": "99999"},
+        allowed_ticket_id="66378", allowed_numero="",
+    )
+    assert err is not None
+    assert err.get("scope_violation") is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANDATORY_CRM_RULES_WEBHOOK — versão enxuta, consistente com tools permitidas
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_webhook_rules_do_not_mention_blocked_tools():
+    """O prompt de webhook NÃO pode mandar chamar tools bloqueadas."""
+    from agents import MANDATORY_CRM_RULES_WEBHOOK, WEBHOOK_BLOCKED_TOOLS
+    for tool in ("buscar_mensagens_ticket", "listar_tickets_pendentes", "listar_tickets_abertos"):
+        assert tool in WEBHOOK_BLOCKED_TOOLS  # sanity
+        assert tool not in MANDATORY_CRM_RULES_WEBHOOK, (
+            f"O prompt de webhook menciona '{tool}' que está bloqueada — contradição"
+        )
+
+
+def test_webhook_rules_emphasize_scope():
+    """O prompt de webhook precisa deixar explícito que o ticket_id é imutável."""
+    from agents import MANDATORY_CRM_RULES_WEBHOOK
+    txt = MANDATORY_CRM_RULES_WEBHOOK.lower()
+    assert "escopo" in txt or "único" in txt
+    assert "ticket_id" in txt
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _extract_webhook_fields — normalização entre formatos de CRM
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_extract_webhook_fields_clickmassa_real_payload():
+    """
+    REGRESSION: o ClickMassa aninha ticketId/contactId dentro de payload["message"].
+    Antes da correção, o extrator só olhava em payload.ticketId (root) e em
+    ticket_obj.id — ambos None no payload real — resultando em ticket_id=''
+    e o agente recusando silenciosamente a responder.
+
+    Payload abaixo é cópia fiel do log de produção (Railway, 2026-04-18).
+    """
+    from agents import _extract_webhook_fields
+
+    payload = {
+        "message": {
+            "mediaName": None,
+            "mediaUrl": "",
+            "msgCreatedAt": "2026-04-18T20:08:57.776Z",
+            "id": "c94dafc1-3ea3-45b4-ada2-c3543ca2989e",
+            "ack": 0,
+            "wabaMediaId": None,
+            "isDownload": True,
+            "userId": None,
+            "body": "Oi",
+            "fromMe": False,
+            "tenantId": 27,
+            "ticketId": 66397,          # ← aninhado em message
+            "contactId": 71890,         # ← aninhado em message
+            "read": False,
+            "messageId": "AC3F7F2C706C5F5AC232110FDF93A31B",
+            "mediaType": "text",
+            "status": "received",
+            "tenantUid": "4f803c5f-c501-4b0e-8348-5933e9d9b671",
+            "isDeleted": False,
+        },
+        "tenantId": 27,
+        "sessionId": "some-session",
+        "event": "message.new",
+    }
+
+    fields = _extract_webhook_fields(payload)
+
+    assert fields["user_input"] == "Oi"
+    assert fields["ticket_id"] == "66397", (
+        f"ticket_id deveria ser '66397' mas veio '{fields['ticket_id']}'"
+    )
+    assert fields["contact_id"] == "71890"
+    assert fields["from_me"] is False
+    assert fields["is_private"] is False
+    assert fields["msg_id"] == "c94dafc1-3ea3-45b4-ada2-c3543ca2989e"
+
+
+def test_extract_webhook_fields_clickmassa_from_me():
+    """Mensagem enviada pela empresa (fromMe=True) deve ser identificada."""
+    from agents import _extract_webhook_fields
+
+    payload = {
+        "message": {
+            "body": "Vai querer oq?",
+            "fromMe": True,
+            "ticketId": 66541,
+            "contactId": 72051,
+        },
+    }
+    fields = _extract_webhook_fields(payload)
+    assert fields["from_me"] is True
+    assert fields["ticket_id"] == "66541"
+
+
+def test_extract_webhook_fields_chatwoot_style():
+    """Formato Chatwoot: dados em payload['data'] com conversation/sender."""
+    from agents import _extract_webhook_fields
+
+    payload = {
+        "event": "message_created",
+        "data": {
+            "content": "Olá, tudo bem?",
+            "message_type": "incoming",
+            "id": "msg-123",
+            "conversation": {"id": 555, "status": "open"},
+            "sender": {"name": "João", "phone_number": "+5511999999999"},
+        },
+    }
+    fields = _extract_webhook_fields(payload)
+    assert fields["user_input"] == "Olá, tudo bem?"
+    assert fields["ticket_id"] == "555"
+    assert fields["contact_number"] == "+5511999999999"
+    assert fields["contact_name"] == "João"
+    assert fields["from_me"] is False
+
+
+def test_extract_webhook_fields_chatwoot_outgoing_is_from_me():
+    """Chatwoot message_type=outgoing deve marcar from_me=True."""
+    from agents import _extract_webhook_fields
+
+    payload = {
+        "data": {
+            "content": "Resposta do bot",
+            "message_type": "outgoing",
+            "conversation": {"id": 555},
+        },
+    }
+    fields = _extract_webhook_fields(payload)
+    assert fields["from_me"] is True
+
+
+def test_extract_webhook_fields_empty_payload():
+    """Payload vazio não deve crashar; retorna campos vazios."""
+    from agents import _extract_webhook_fields
+
+    fields = _extract_webhook_fields({})
+    assert fields["user_input"] == ""
+    assert fields["ticket_id"] == ""
+    assert fields["contact_id"] == ""
+    assert fields["from_me"] is False
+
+
+def test_extract_webhook_fields_none_string_coerced_to_empty():
+    """ticketId='None' ou 'null' ou '0' devem ser tratados como vazio."""
+    from agents import _extract_webhook_fields
+
+    for bad in ("None", "null", "0", 0):
+        payload = {"message": {"body": "x", "ticketId": bad}}
+        fields = _extract_webhook_fields(payload)
+        assert fields["ticket_id"] == "", f"ticketId={bad!r} deveria virar '' mas ficou {fields['ticket_id']!r}"
+
+
+def test_extract_webhook_fields_notification_is_private():
+    """messageType=notification deve marcar is_private=True."""
+    from agents import _extract_webhook_fields
+
+    payload = {"message": {"body": "status update"}, "messageType": "notification"}
+    fields = _extract_webhook_fields(payload)
+    assert fields["is_private"] is True
