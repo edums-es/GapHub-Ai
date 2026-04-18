@@ -1662,25 +1662,27 @@ async def webhook_trigger(
         logger.info(f"[Webhook {agent_id}] ignorado: nota interna ou notificação")
         return {"status": "ignored", "reason": "Nota interna ou notificação ignorada"}
 
-    # ── GATE DE STATUS DO TICKET ──────────────────────────────────────────────
-    # O agente SÓ age em tickets pendentes (aguardando atendimento).
-    # Tickets já em atendimento por humano / fechados / resolvidos → NÃO responde.
-    # Isso evita o bot responder tickets que o operador está tratando.
+    # ── GATE DE STATUS DO TICKET (BLACKLIST-FIRST) ────────────────────────────
+    # Filosofia: default é PROCESSAR. Só bloqueia se o status indica claramente
+    # "já atendido/fechado/resolvido". Qualquer outro valor (incluindo vazio,
+    # "open", "pending", "aberto", "novo", "in_queue", etc.) passa.
     #
-    # A lista de status permitidos é configurável por variável de ambiente
-    # WEBHOOK_ALLOWED_STATUSES (csv). Default cobre os nomes comuns do ClickMassa/
-    # WAHA/Chatwoot para "pendente".
-    allowed_statuses_env = os.environ.get(
-        "WEBHOOK_ALLOWED_STATUSES",
-        "pending,pendente,waiting,aguardando,novo,new,open_pending,"
+    # Isso evita falsos bloqueios quando o CRM usa nomenclaturas que não estão
+    # na nossa whitelist. O objetivo é filtrar APENAS tickets comprovadamente
+    # fora do fluxo "bot responde pendente".
+    #
+    # Override: WEBHOOK_BLOCKED_STATUSES (env csv) ou
+    # agent.webhook_blocked_statuses (array).
+    blocked_statuses_env = os.environ.get(
+        "WEBHOOK_BLOCKED_STATUSES",
+        "closed,resolved,fechado,resolvido,atendido,attending,em_atendimento,completed,done",
     )
-    ALLOWED_TICKET_STATUSES = {
-        s.strip().lower() for s in allowed_statuses_env.split(",") if s.strip()
+    BLOCKED_TICKET_STATUSES = {
+        s.strip().lower() for s in blocked_statuses_env.split(",") if s.strip()
     }
-    # Se o agente tiver override no doc, usa ele
-    agent_allowed = agent.get("webhook_allowed_statuses")
-    if isinstance(agent_allowed, list) and agent_allowed:
-        ALLOWED_TICKET_STATUSES = {str(s).lower() for s in agent_allowed if s}
+    agent_blocked = agent.get("webhook_blocked_statuses")
+    if isinstance(agent_blocked, list) and agent_blocked:
+        BLOCKED_TICKET_STATUSES = {str(s).lower() for s in agent_blocked if s}
 
     ticket_status_raw = (
         ticket_obj.get("status")
@@ -1692,46 +1694,49 @@ async def webhook_trigger(
     )
     ticket_status = str(ticket_status_raw).strip().lower()
 
-    # Status vazio = tratamos como permitido (muitos CRMs não enviam status no webhook
-    # de nova mensagem do lead, apenas no de mudança de status). O importante é
-    # bloquear quando o status diz claramente "atendido/fechado/resolvido".
-    BLOCKED_KEYWORDS = ("closed", "resolved", "fechado", "resolvido", "attending", "em_atendimento", "in_progress", "atendido")
-    if ticket_status and ticket_status not in ALLOWED_TICKET_STATUSES:
-        # Log e ignora — mas só se bater alguma keyword bloqueada OU se o campo veio
-        # com valor conhecido diferente dos permitidos.
-        if any(kw in ticket_status for kw in BLOCKED_KEYWORDS) or ticket_status not in ("",):
-            logger.info(
-                f"[Webhook {agent_id}] ignorado: ticket_status='{ticket_status}' fora da lista "
-                f"de permitidos={sorted(ALLOWED_TICKET_STATUSES)}"
-            )
-            return {
-                "status": "ignored",
-                "reason": f"Ticket em status '{ticket_status}' — agente só atua em tickets pendentes",
-            }
-
-    # Se o ticket tem um operador humano atribuído, o bot NÃO responde.
-    # Alguns CRMs enviam user_id / assignedTo quando um humano pega o ticket.
-    assigned_user_id = (
-        ticket_obj.get("userId")
-        or ticket_obj.get("user_id")
-        or ticket_obj.get("assignedTo")
-        or ticket_obj.get("assigned_to")
-        or (ticket_obj.get("user") or {}).get("id") if isinstance(ticket_obj.get("user"), dict) else None
-        or data_wrap.get("userId")
-        or data_wrap.get("user_id")
+    logger.info(
+        f"[Webhook {agent_id}] gate: ticket_status='{ticket_status}' "
+        f"blocked_set={sorted(BLOCKED_TICKET_STATUSES)}"
     )
-    # Opt-in: se o agente tiver "ignore_assigned_tickets": true (ou por default config),
-    # ignora tickets com operador atribuído. Default True para segurança.
-    ignore_assigned = agent.get("webhook_ignore_assigned", True)
-    if ignore_assigned and assigned_user_id and str(assigned_user_id) not in ("0", "None", "null", ""):
+
+    # Match exato OU substring (pega variações tipo "open_closed" ou "ticket_resolved")
+    if ticket_status and (
+        ticket_status in BLOCKED_TICKET_STATUSES
+        or any(kw in ticket_status for kw in BLOCKED_TICKET_STATUSES)
+    ):
         logger.info(
-            f"[Webhook {agent_id}] ignorado: ticket_id={ticket_obj.get('id') or '?'} "
-            f"atribuído ao operador user_id={assigned_user_id}"
+            f"[Webhook {agent_id}] ignorado: ticket_status='{ticket_status}' bate em blocked"
         )
         return {
             "status": "ignored",
-            "reason": "Ticket atribuído a operador humano — agente não atua (desligue webhook_ignore_assigned para forçar)",
+            "reason": f"Ticket em status '{ticket_status}' — agente não atua em tickets fechados/atendidos",
         }
+
+    # Bloqueio por operador atribuído — OPT-IN (default false).
+    # ClickMassa/Chatwoot podem popular userId mesmo com bot-user, então não
+    # bloqueamos por default. Ative com agent.webhook_ignore_assigned=true se
+    # quiser que humano atendendo pare o bot.
+    ignore_assigned = bool(agent.get("webhook_ignore_assigned", False))
+    if ignore_assigned:
+        ticket_user_dict = ticket_obj.get("user") if isinstance(ticket_obj.get("user"), dict) else {}
+        assigned_user_id = (
+            ticket_obj.get("userId")
+            or ticket_obj.get("user_id")
+            or ticket_obj.get("assignedTo")
+            or ticket_obj.get("assigned_to")
+            or ticket_user_dict.get("id")
+            or data_wrap.get("userId")
+            or data_wrap.get("user_id")
+        )
+        if assigned_user_id and str(assigned_user_id) not in ("0", "None", "null", ""):
+            logger.info(
+                f"[Webhook {agent_id}] ignorado: ticket atribuído a user_id={assigned_user_id} "
+                f"(webhook_ignore_assigned=true)"
+            )
+            return {
+                "status": "ignored",
+                "reason": "Ticket atribuído a operador humano — agente desativado por webhook_ignore_assigned",
+            }
     # ──────────────────────────────────────────────────────────────────────────
 
     # --- user_input ---
@@ -1783,6 +1788,19 @@ async def webhook_trigger(
     contact_id = str(contact_obj.get("id") or payload.get("contactId") or "")
 
     logger.info(f"[Webhook {agent_id}] extraído: input='{user_input[:60]}' ticket_id='{ticket_id}' contact_number='{contact_number}' contact_name='{contact_name}'")
+
+    # Log completo dos campos relevantes para o gate — facilita diagnóstico
+    # quando o bot "parar de responder".
+    _ticket_user = ticket_obj.get("user") if isinstance(ticket_obj.get("user"), dict) else {}
+    logger.info(
+        f"[Webhook {agent_id}] gate-fields: "
+        f"ticket.status={ticket_obj.get('status')!r} "
+        f"ticket.state={ticket_obj.get('state')!r} "
+        f"data.status={data_wrap.get('status')!r} "
+        f"ticket.userId={ticket_obj.get('userId')!r} "
+        f"ticket.user.id={_ticket_user.get('id')!r} "
+        f"ticket.assignedTo={ticket_obj.get('assignedTo')!r}"
+    )
 
     # ── PROTEÇÃO ANTI-LOOP ─────────────────────────────────────────────────────
     # Camada 1: deduplicação por ID da mensagem
