@@ -70,17 +70,16 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
    NUNCA confunda [EMPRESA] com mensagem do lead.
    Sempre leia todos os prefixos antes de tirar conclusões sobre o que o lead quer.
 
-2. QUANDO ENVIAR MENSAGEM AO LEAD (IMPORTANTÍSSIMO):
+2. QUANDO ENVIAR MENSAGEM AO LEAD:
    - Se o input começar com "[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]":
-     * Use "enviar_mensagem" que usa a Push API (registra como envio externo à direita no CRM).
-     * NUNCA use "enviar_mensagem_direta" — ela registra a mensagem como se fosse do lead (aparece à esquerda no CRM, causando confusão).
+     * Use "enviar_mensagem" ou "enviar_mensagem_direta" EXATAMENTE UMA VEZ.
+     * O sistema adiciona automaticamente fromMe=True para registrar como mensagem da empresa.
      * APÓS enviar, PARE COMPLETAMENTE. Não faça mais nenhuma chamada de ferramenta.
      * NÃO use "buscar_mensagens_ticket" — a mensagem já está no input.
      * NÃO simule o lead respondendo. NÃO continue a conversa sozinho.
      * Resposta em UMA mensagem, encerrada.
-   - Em todos os contextos, use SOMENTE "enviar_mensagem" (Push API).
-   - NUNCA use "enviar_mensagem_direta" — ela buga a direção da mensagem no CRM.
-   - NUNCA envie mensagens múltiplas em sequência sem o lead ter respondido entre elas.
+   - Em outros contextos, use "enviar_mensagem_direta" SOMENTE quando explicitamente pedido.
+   - NUNCA envie mensagens múltiplas em sequência sem o lead terRespondido entre elas.
    - NUNCA escreva diálogos fictícios como "Lead: ...", "Cliente: ...", "Agente: ..." dentro
      do texto da mensagem. Envie APENAS sua resposta direta, em primeira pessoa.
 
@@ -103,6 +102,9 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
 # prior reply and answer itself. Any tool that lets the LLM "look at other
 # tickets" is blocked — the agent must stay strictly scoped to the ticket
 # that triggered the webhook.
+#
+# Nota: enviar_mensagem e enviar_mensagem_direta agora usam fromMe=True automaticamente,
+# então ambas podem ser usadas em webhook mode.
 WEBHOOK_BLOCKED_TOOLS = {
     # Listagem/busca de mensagens ou outros tickets (fuga de escopo)
     "buscar_mensagens_ticket",
@@ -116,11 +118,6 @@ WEBHOOK_BLOCKED_TOOLS = {
     "listar_contatos",
     "get_messages",
     "list_messages",
-    # enviar_mensagem_direta usa POST /messages/{id} SEM flag de empresa →
-    # a ClickMassa registra a mensagem como se fosse do lead (aparece à esquerda
-    # no CRM, sem "Envio externo"). Em webhook_mode, SEMPRE usar enviar_mensagem
-    # (Push API /v1/api/external/{canal}) que registra corretamente como empresa.
-    "enviar_mensagem_direta",
     # MCP-namespaced variants (clickmassa__*)
     "clickmassa__buscar_mensagens_ticket",
     "clickmassa__listar_tickets_pendentes",
@@ -131,7 +128,6 @@ WEBHOOK_BLOCKED_TOOLS = {
     "clickmassa__buscar_contato_por_numero",
     "clickmassa__buscar_contato_por_id",
     "clickmassa__listar_contatos",
-    "clickmassa__enviar_mensagem_direta",
 }
 
 
@@ -153,19 +149,17 @@ REGRAS OBRIGATÓRIAS — MODO WEBHOOK (SEMPRE SIGA, SEM EXCEÇÃO):
    histórico. A mensagem do lead já está no input, entre aspas. Tudo que você
    precisa está ali.
 
-3. TOOL DE ENVIO ÚNICA: Para responder o lead, use SOMENTE `enviar_mensagem`
-   (que usa a Push API e registra a mensagem corretamente como da empresa).
-   NÃO use `enviar_mensagem_direta` — está bloqueada em webhook porque registra
-   a mensagem como se fosse do lead no CRM.
+3. TOOLS DE ENVIO: Pode usar `enviar_mensagem` ou `enviar_mensagem_direta`.
+   Ambas adicionam fromMe=True automaticamente para registrar como mensagem da empresa.
 
-4. VALORES IMUTÁVEIS: Ao chamar enviar_mensagem ou enviar_midia, use EXATAMENTE
+4. VALORES IMUTÁVEIS: Ao chamar ferramentas de envio, use EXATAMENTE
    o número fornecido no input. Se passar outro valor, a chamada será rejeitada.
 
 5. UMA MENSAGEM, UMA SÓ: Envie UMA única resposta ao lead e PARE. Não encadeie
    mensagens, não continue a conversa sozinho, não simule o lead respondendo.
    NUNCA escreva "Lead: ...", "Cliente: ...", "Agente: ..." dentro do texto.
 
-6. NOTA INTERNA É SÓ PARA REGISTRO: Use enviar_nota_interna apenas para
+6. NOTA INTERNA É SÓ PARA REGISTRO: Use usar_nota_interna apenas para
    observações internas da equipe. Não substitui a resposta ao lead.
 ---"""
 
@@ -184,25 +178,14 @@ def _enforce_ticket_scope(
       - Se params traz ticket_id diferente do esperado → retorna erro (blocked).
       - Se params traz numero/phone diferente do esperado → retorna erro.
       - Se não trouxer, injeta o valor correto (LLM às vezes esquece).
-      - enviar_mensagem_direta é convertida para enviar_mensagem (Push API) para evitar o bug de direção.
       - Tools que não são de envio passam inalteradas.
 
-    IMPORTANTE: usar SEMPRE enviar_mensagem (Push API /v1/api/external) que registra
-    corretamente como "Envio externo" à direita no CRM. enviar_mensagem_direta
-    (POST /messages/{id}) não tem flag de empresa e faz a mensagem aparecer como
-    se fosse do lead (à esquerda), causando confusão visual.
+    Nota: ambas as ferramentas (enviar_mensagem e enviar_mensagem_direta) agora usam
+    fromMe=True automaticamente, então não há mais problema de direção.
     """
     bare = fn_name.split("__", 1)[1] if "__" in (fn_name or "") else (fn_name or "")
     
-    # CRÍTICO: converter enviar_mensagem_direta para enviar_mensagem
-    # O bug: direto usa POST /messages/{id} sem flag → mensagem aparece como do lead
-    # Solução: forçar uso de Push API (enviar_mensagem) que funciona corretamente
-    if bare == "enviar_mensagem_direta":
-        logger.info(f"[enforce_ticket_scope] convertendo enviar_mensagem_direta → enviar_mensagem (Push API)")
-        bare = "enviar_mensagem"
-        fn_name = "enviar_mensagem"  # atualizar para retorno
-    
-    # Tools sensíveis ao escopo do ticket (qualquer uma que aceita ticket_id ou numero)
+    # Tools sensíveis ao escopo do ticket
     scoped_tools = {
         "enviar_mensagem", "enviar_mensagem_direta", "enviar_midia",
         "enviar_nota_interna", "fechar_ticket", "devolver_para_fila",
@@ -238,11 +221,11 @@ def _enforce_ticket_scope(
                     "blocked": True,
                     "scope_violation": True,
                 }
-        # Injeta o número permitido — Push API precisa do número para enviar via canal
-        if bare == "enviar_mensagem" and not any(out.get(k) for k in ("numero", "number", "phone", "phone_number")):
+        # Injeta número se necessário
+        if bare in ("enviar_mensagem", "enviar_mensagem_direta") and not any(out.get(k) for k in ("numero", "number", "phone", "phone_number")):
             if allowed_numero:
                 out["numero"] = str(allowed_numero)
-                logger.info(f"[enforce_ticket_scope] injetando numero={allowed_numero} para Push API")
+                logger.info(f"[enforce_ticket_scope] injetando numero={allowed_numero}")
 
     return fn_name, out, None
 
