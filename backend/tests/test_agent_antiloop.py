@@ -323,12 +323,12 @@ def test_enforce_ticket_scope_mcp_namespaced():
     assert err.get("scope_violation") is True
 
 
-def test_enforce_ticket_scope_rewrites_enviar_mensagem_direta_without_numero():
+def test_enforce_ticket_scope_passthrough_direta_without_numero():
     """
-    REGRESSION: O ClickMassa respondeu "Olá! Tudo bem?..." mas não chegou no
-    WhatsApp do lead porque o LLM chamou enviar_mensagem_direta com numero="".
-    Agora o scope lock converte essa chamada para enviar_mensagem (usa ticket_id),
-    garantindo que a mensagem chegue no WhatsApp.
+    Após adoção de fromMe=True em ambas as tools de envio (commit 4906b2a),
+    enviar_mensagem_direta com apenas ticket_id é VÁLIDO — a mensagem aparece
+    corretamente como da empresa no CRM. O scope lock apenas valida que o ticket_id
+    bate e passa adiante sem reescrever o fn_name.
     """
     from agents import _enforce_ticket_scope
     fn, params, err = _enforce_ticket_scope(
@@ -337,13 +337,12 @@ def test_enforce_ticket_scope_rewrites_enviar_mensagem_direta_without_numero():
         allowed_ticket_id="66397", allowed_numero="",
     )
     assert err is None
-    assert fn == "enviar_mensagem", f"esperado reescrita para enviar_mensagem, veio '{fn}'"
+    assert fn == "enviar_mensagem_direta"  # não reescreve — fromMe=True já resolve
     assert params["ticket_id"] == "66397"
-    assert "numero" not in params  # número vazio foi removido
     assert params["mensagem"] == "Olá"
 
 
-def test_enforce_ticket_scope_rewrites_mcp_namespaced_direta():
+def test_enforce_ticket_scope_passthrough_mcp_namespaced_direta():
     """Idem acima, com prefixo clickmassa__."""
     from agents import _enforce_ticket_scope
     fn, params, err = _enforce_ticket_scope(
@@ -352,7 +351,7 @@ def test_enforce_ticket_scope_rewrites_mcp_namespaced_direta():
         allowed_ticket_id="66397", allowed_numero="",
     )
     assert err is None
-    assert fn == "clickmassa__enviar_mensagem"
+    assert fn == "clickmassa__enviar_mensagem_direta"  # não reescreve
     assert params["ticket_id"] == "66397"
 
 

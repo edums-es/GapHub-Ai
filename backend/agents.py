@@ -237,6 +237,10 @@ def _enforce_ticket_scope(
                 "blocked": True,
                 "scope_violation": True,
             }
+        # Injeta ticket_id quando ausente — o LLM às vezes esquece, e a tool precisa.
+        if not provided_tid:
+            out["ticket_id"] = str(allowed_ticket_id)
+            logger.info(f"[enforce_ticket_scope] injetando ticket_id={allowed_ticket_id}")
 
     if allowed_numero:
         for key in ("numero", "number", "phone", "phone_number"):
