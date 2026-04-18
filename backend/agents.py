@@ -70,14 +70,16 @@ REGRAS OBRIGATÓRIAS DO CRM (SEMPRE SIGA — SEM EXCEÇÃO):
    NUNCA confunda [EMPRESA] com mensagem do lead.
    Sempre leia todos os prefixos antes de tirar conclusões sobre o que o lead quer.
 
-2. QUANDO ENVIAR MENSAGEM AO LEAD:
+2. QUANDO ENVIAR MENSAGEM AO LEAD (IMPORTANTÍSSIMO):
    - Se o input começar com "[WEBHOOK AUTOMÁTICO — RESPOSTA OBRIGATÓRIA]":
-     * Use "enviar_mensagem_direta" ou "enviar_mensagem" EXATAMENTE UMA VEZ.
+     * Use "enviar_mensagem" que usa a Push API (registra como envio externo à direita no CRM).
+     * NUNCA use "enviar_mensagem_direta" — ela registra a mensagem como se fosse do lead (aparece à esquerda no CRM, causando confusão).
      * APÓS enviar, PARE COMPLETAMENTE. Não faça mais nenhuma chamada de ferramenta.
      * NÃO use "buscar_mensagens_ticket" — a mensagem já está no input.
      * NÃO simule o lead respondendo. NÃO continue a conversa sozinho.
      * Resposta em UMA mensagem, encerrada.
-   - Em outros contextos, use "enviar_mensagem_direta" SOMENTE quando explicitamente pedido.
+   - Em todos os contextos, use SOMENTE "enviar_mensagem" (Push API).
+   - NUNCA use "enviar_mensagem_direta" — ela buga a direção da mensagem no CRM.
    - NUNCA envie mensagens múltiplas em sequência sem o lead ter respondido entre elas.
    - NUNCA escreva diálogos fictícios como "Lead: ...", "Cliente: ...", "Agente: ..." dentro
      do texto da mensagem. Envie APENAS sua resposta direta, em primeira pessoa.
@@ -114,6 +116,11 @@ WEBHOOK_BLOCKED_TOOLS = {
     "listar_contatos",
     "get_messages",
     "list_messages",
+    # enviar_mensagem_direta usa POST /messages/{id} SEM flag de empresa →
+    # a ClickMassa registra a mensagem como se fosse do lead (aparece à esquerda
+    # no CRM, sem "Envio externo"). Em webhook_mode, SEMPRE usar enviar_mensagem
+    # (Push API /v1/api/external/{canal}) que registra corretamente como empresa.
+    "enviar_mensagem_direta",
     # MCP-namespaced variants (clickmassa__*)
     "clickmassa__buscar_mensagens_ticket",
     "clickmassa__listar_tickets_pendentes",
@@ -124,6 +131,7 @@ WEBHOOK_BLOCKED_TOOLS = {
     "clickmassa__buscar_contato_por_numero",
     "clickmassa__buscar_contato_por_id",
     "clickmassa__listar_contatos",
+    "clickmassa__enviar_mensagem_direta",
 }
 
 
@@ -145,15 +153,19 @@ REGRAS OBRIGATÓRIAS — MODO WEBHOOK (SEMPRE SIGA, SEM EXCEÇÃO):
    histórico. A mensagem do lead já está no input, entre aspas. Tudo que você
    precisa está ali.
 
-3. VALORES IMUTÁVEIS: Quando chamar enviar_mensagem / enviar_mensagem_direta /
-   enviar_midia, use EXATAMENTE o ticket_id e o número fornecidos no input.
-   Se você passar outro valor, a chamada será rejeitada e você será forçado a parar.
+3. TOOL DE ENVIO ÚNICA: Para responder o lead, use SOMENTE `enviar_mensagem`
+   (que usa a Push API e registra a mensagem corretamente como da empresa).
+   NÃO use `enviar_mensagem_direta` — está bloqueada em webhook porque registra
+   a mensagem como se fosse do lead no CRM.
 
-4. UMA MENSAGEM, UMA SÓ: Envie UMA única resposta ao lead e PARE. Não encadeie
+4. VALORES IMUTÁVEIS: Ao chamar enviar_mensagem ou enviar_midia, use EXATAMENTE
+   o número fornecido no input. Se passar outro valor, a chamada será rejeitada.
+
+5. UMA MENSAGEM, UMA SÓ: Envie UMA única resposta ao lead e PARE. Não encadeie
    mensagens, não continue a conversa sozinho, não simule o lead respondendo.
    NUNCA escreva "Lead: ...", "Cliente: ...", "Agente: ..." dentro do texto.
 
-5. NOTA INTERNA É SÓ PARA REGISTRO: Use enviar_nota_interna apenas para
+6. NOTA INTERNA É SÓ PARA REGISTRO: Use enviar_nota_interna apenas para
    observações internas da equipe. Não substitui a resposta ao lead.
 ---"""
 
@@ -172,14 +184,24 @@ def _enforce_ticket_scope(
       - Se params traz ticket_id diferente do esperado → retorna erro (blocked).
       - Se params traz numero/phone diferente do esperado → retorna erro.
       - Se não trouxer, injeta o valor correto (LLM às vezes esquece).
-      - enviar_mensagem_direta SEM número válido → converte para enviar_mensagem
-        (que usa apenas ticket_id), evitando que a mensagem vá pro limbo (como
-        aconteceu em produção 2026-04-18: LLM chamou enviar_mensagem_direta com
-        numero="" e a mensagem nunca chegou no WhatsApp do lead).
+      - enviar_mensagem_direta é convertida para enviar_mensagem (Push API) para evitar o bug de direção.
       - Tools que não são de envio passam inalteradas.
+
+    IMPORTANTE: usar SEMPRE enviar_mensagem (Push API /v1/api/external) que registra
+    corretamente como "Envio externo" à direita no CRM. enviar_mensagem_direta
+    (POST /messages/{id}) não tem flag de empresa e faz a mensagem aparecer como
+    se fosse do lead (à esquerda), causando confusão visual.
     """
     bare = fn_name.split("__", 1)[1] if "__" in (fn_name or "") else (fn_name or "")
-    prefix = fn_name.split("__", 1)[0] + "__" if "__" in (fn_name or "") else ""
+    
+    # CRÍTICO: converter enviar_mensagem_direta para enviar_mensagem
+    # O bug: direto usa POST /messages/{id} sem flag → mensagem aparece como do lead
+    # Solução: forçar uso de Push API (enviar_mensagem) que funciona corretamente
+    if bare == "enviar_mensagem_direta":
+        logger.info(f"[enforce_ticket_scope] convertendo enviar_mensagem_direta → enviar_mensagem (Push API)")
+        bare = "enviar_mensagem"
+        fn_name = "enviar_mensagem"  # atualizar para retorno
+    
     # Tools sensíveis ao escopo do ticket (qualquer uma que aceita ticket_id ou numero)
     scoped_tools = {
         "enviar_mensagem", "enviar_mensagem_direta", "enviar_midia",
@@ -202,8 +224,6 @@ def _enforce_ticket_scope(
                 "blocked": True,
                 "scope_violation": True,
             }
-        if not provided_tid:
-            out["ticket_id"] = str(allowed_ticket_id)
 
     if allowed_numero:
         for key in ("numero", "number", "phone", "phone_number"):
@@ -218,24 +238,11 @@ def _enforce_ticket_scope(
                     "blocked": True,
                     "scope_violation": True,
                 }
+        # Injeta o número permitido — Push API precisa do número para enviar via canal
         if bare == "enviar_mensagem" and not any(out.get(k) for k in ("numero", "number", "phone", "phone_number")):
-            out["numero"] = str(allowed_numero)
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # SALVA-VIDAS: se LLM chamou enviar_mensagem_direta mas não temos número,
-    # converte para enviar_mensagem (que usa ticket_id). Isso garante que a
-    # mensagem SEMPRE chegue no WhatsApp do lead, mesmo se o LLM escolheu
-    # a tool errada e o payload do webhook não trouxe o número do contato.
-    # ──────────────────────────────────────────────────────────────────────────
-    if bare == "enviar_mensagem_direta":
-        has_numero = any(str(out.get(k) or "").strip() for k in ("numero", "number", "phone", "phone_number"))
-        if not has_numero and allowed_ticket_id:
-            # Remove qualquer chave de número vazia que possa confundir o MCP
-            for k in ("numero", "number", "phone", "phone_number"):
-                out.pop(k, None)
-            out["ticket_id"] = str(allowed_ticket_id)
-            new_fn = f"{prefix}enviar_mensagem" if prefix else "enviar_mensagem"
-            return new_fn, out, None
+            if allowed_numero:
+                out["numero"] = str(allowed_numero)
+                logger.info(f"[enforce_ticket_scope] injetando numero={allowed_numero} para Push API")
 
     return fn_name, out, None
 
@@ -1939,6 +1946,34 @@ async def webhook_trigger(
             "created_at": datetime.now(timezone.utc)
         })
 
+    # Camada 1.5: COOLDOWN pós-resposta por ticket.
+    # Quando o lead manda várias mensagens seguidas ("Oi", "Olá", "Tô aí"), a ClickMassa
+    # dispara um webhook por mensagem — e sem cooldown, o agente responde cada uma
+    # separadamente, gerando a rajada de respostas iguais que o operador vê no CRM.
+    # Aqui: se o agente já respondeu este ticket nos últimos N segundos, ignora o
+    # webhook (a próxima mensagem do lead só será atendida depois da janela).
+    # Configurável via agent.webhook_cooldown_seconds (default 15s, 0 desliga).
+    cooldown_seconds = int(agent.get("webhook_cooldown_seconds", 15) or 0)
+    if cooldown_seconds > 0 and ticket_id:
+        last_reply = await db.webhook_last_reply.find_one(
+            {"agent_id": agent_id, "ticket_id": str(ticket_id)}
+        )
+        if last_reply:
+            last_at = last_reply.get("replied_at")
+            if last_at:
+                if last_at.tzinfo is None:
+                    last_at = last_at.replace(tzinfo=timezone.utc)
+                elapsed = (datetime.now(timezone.utc) - last_at).total_seconds()
+                if elapsed < cooldown_seconds:
+                    logger.info(
+                        f"[Webhook {agent_id}] ignorado: cooldown ativo para ticket {ticket_id} "
+                        f"({elapsed:.1f}s < {cooldown_seconds}s)"
+                    )
+                    return {
+                        "status": "ignored",
+                        "reason": f"Cooldown de {cooldown_seconds}s — resposta anterior há {elapsed:.1f}s",
+                    }
+
     # Camada 2: lock atômico por ticket — solução definitiva para race condition.
     # O cooldown anterior usava find_one + insert separados, deixando uma janela de ~10ms
     # onde múltiplos webhooks simultâneos passavam ao mesmo tempo.
@@ -2083,32 +2118,34 @@ async def webhook_trigger(
             )
 
             # Fallback automático: se o agente gerou texto mas não chamou enviar_mensagem,
-            # envia a resposta programaticamente para garantir que o lead receba
+            # envia a resposta programaticamente via Push API (enviar_mensagem) — NUNCA
+            # via enviar_mensagem_direta, que registra a mensagem como se fosse do lead
+            # no CRM (bug descoberto em 2026-04-18: POST /messages/{id} sem flag de empresa).
             sent_via_tool = any("enviar_mensagem" in s.get("tool", "") for s in steps)
             if not sent_via_tool and workspace_creds.get("clickmassa"):
                 creds_cm = workspace_creds["clickmassa"]
                 send_result = None
                 try:
-                    if ticket_id_for_reply:
-                        logger.info(f"[Webhook {agent_id}] fallback: enviando via ticket_id={ticket_id_for_reply}")
-                        send_result = await execute_tool("clickmassa", "enviar_mensagem_direta", {
-                            "ticket_id": str(ticket_id_for_reply),
-                            "mensagem": output,
-                        }, creds_cm)
-                    elif contact_number_for_reply:
-                        logger.info(f"[Webhook {agent_id}] fallback: enviando via numero={contact_number_for_reply}")
+                    if contact_number_for_reply:
+                        logger.info(f"[Webhook {agent_id}] fallback: enviando via Push API (numero={contact_number_for_reply})")
                         send_result = await execute_tool("clickmassa", "enviar_mensagem", {
                             "numero": contact_number_for_reply,
                             "mensagem": output,
                         }, creds_cm)
                     else:
-                        logger.warning(f"[Webhook {agent_id}] fallback: sem ticket_id nem contact_number — não foi possível enviar automaticamente")
+                        # Sem número não dá pra usar Push API. Não fazemos fallback para
+                        # enviar_mensagem_direta porque a mensagem apareceria como do lead.
+                        logger.warning(
+                            f"[Webhook {agent_id}] fallback NÃO executado: sem contact_number. "
+                            f"A mensagem do agente foi gerada mas não pôde ser enviada via Push API. "
+                            f"Verifique se o payload do CRM traz ticket.contact.number."
+                        )
 
                     if send_result:
                         logger.info(f"[Webhook {agent_id}] fallback result: {json.dumps(send_result, ensure_ascii=False, default=str)[:200]}")
                         steps.append({
                             "tool": "auto_send_fallback",
-                            "params": {"ticket_id": ticket_id_for_reply, "numero": contact_number_for_reply},
+                            "params": {"numero": contact_number_for_reply},
                             "result": send_result,
                             "iteration": 0,
                         })
@@ -2116,6 +2153,30 @@ async def webhook_trigger(
                     logger.error(f"[Webhook {agent_id}] fallback FALHOU: {send_err}", exc_info=True)
             elif not sent_via_tool:
                 logger.warning(f"[Webhook {agent_id}] fallback ignorado: credenciais clickmassa não encontradas. creds keys={list(workspace_creds.keys())}")
+
+            # Registra timestamp da última resposta para alimentar o cooldown da Camada 1.5.
+            # Uma resposta foi considerada enviada se:
+            #   - o agente chamou enviar_mensagem (sent_via_tool), OU
+            #   - o fallback programático executou com sucesso (steps tem auto_send_fallback).
+            reply_sent = sent_via_tool or any(
+                s.get("tool") == "auto_send_fallback" and s.get("result")
+                for s in steps
+            )
+            if reply_sent and ticket_id:
+                try:
+                    await db.webhook_last_reply.update_one(
+                        {"agent_id": agent_id, "ticket_id": str(ticket_id)},
+                        {"$set": {
+                            "agent_id": agent_id,
+                            "ticket_id": str(ticket_id),
+                            "replied_at": datetime.now(timezone.utc),
+                            "run_id": run_id,
+                        }},
+                        upsert=True,
+                    )
+                    logger.info(f"[Webhook {agent_id}] replied_at registrado para ticket {ticket_id}")
+                except Exception as reg_err:
+                    logger.warning(f"[Webhook {agent_id}] falha ao registrar replied_at: {reg_err}")
 
             await db.runs.update_one(
                 {"run_id": run_id},

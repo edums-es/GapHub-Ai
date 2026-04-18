@@ -182,15 +182,25 @@ async def execute_clickmassa_tool(tool_name: str, params: dict, credentials: dic
             elif tool_name == "adicionar_etiquetas":
                 return await c.patch(f"{base_url}/v1/contacts/{params['id']}", json={"tags": params["tags"]}, headers=headers)
             elif tool_name == "enviar_mensagem":
+                # BUG FIX CRÍTICO: usar Push API (/v1/api/external/{canal}) que registra corretamente
+                # como "Envio externo" à direita no CRM, em vez de POST /messages/{id}
+                # que faz a mensagem aparecer como se fosse do lead (esquerda).
+                # Referência: o MCP ClickMassa usa exatamente esta API em src/tools.js:sendExternalMessage
                 numero = params.get("numero")
                 if not numero:
                     return {"error": "Número é obrigatório."}
-                search = await c.get(f"{base_url}/tickets?searchParam={numero}&showAll=true", headers=headers)
-                tickets = search.json().get("tickets", [])
-                ticket = next((t for t in tickets if t["contact"]["number"] == numero and t["status"] in ["open", "pending"]), None)
-                if not ticket:
-                    return {"error": f"Nenhum ticket aberto para {numero}"}
-                return await c.post(f"{base_url}/messages/{ticket['id']}", json={"body": params["mensagem"]}, headers=headers)
+                mensagem = params.get("mensagem")
+                if not mensagem:
+                    return {"error": "Mensagem é obrigatória."}
+                canal_id = credentials.get("canal_id", "").strip()
+                if not canal_id:
+                    return {"error": "canal_id não configurado. Configure o ID do canal WhatsApp nas credenciais do agente (campo 'canal_id')."}
+                push_payload = {
+                    "number": numero,
+                    "body": mensagem,
+                    "externalKey": f"gaphub-{int(time.time())}",
+                }
+                return await c.post(f"{base_url}/v1/api/external/{canal_id}", json=push_payload, headers=headers)
             elif tool_name == "enviar_mensagem_direta":
                 ticket_id = params.get("ticket_id")
                 if not ticket_id:
@@ -432,9 +442,9 @@ def _make_tool_def(mcp_id: str, name: str, description: str) -> dict:
         "atualizar_contato": {"id": {"type": "string"}, "nome": {"type": "string"}, "email": {"type": "string"}, "leadStatusId": {"type": "number"}, "leadOriginId": {"type": "number"}},
         "adicionar_etiquetas": {"id": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}},
         "enviar_mensagem": {
-            "numero": {"type": "string", "description": "Número do destinatário"},
-            "mensagem": {"type": "string", "description": "Texto da mensagem a enviar ao LEAD — use SOMENTE quando explicitamente pedido para contatar o lead"},
-            "canal_id": {"type": "string"},
+            "numero": {"type": "string", "description": "Número do destinatário com DDI+DDD. Ex: 5527999990000"},
+            "mensagem": {"type": "string", "description": "Texto da mensagem a enviar ao lead. Use uma mensagem direta, em primeira pessoa, sem diálogos fictícios."},
+            "canal_id": {"type": "string", "description": "ID do canal WhatsApp. Se omitido, usa o canal_id das credenciais configuradas."},
         },
         "enviar_mensagem_direta": {
             "numero": {"type": "string", "description": "Número (DDI+DDD) — OPCIONAL se usar ticket_id"},

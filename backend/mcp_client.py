@@ -75,6 +75,12 @@ class MCPClient:
         """
         Constrói cabeçalhos HTTP para autenticação no MCP.
         Suporta userToken (Bearer) ou apiUrl+email+password (fallback).
+        
+        Headers aceitos pelo MCP ClickMassa:
+        - Authorization: Bearer token
+        - X-CRM-Api-Url: URL da instância (para multi-tenant)
+        - X-CRM-Waba-Id: ID do canal WhatsApp
+        - X-CRM-Canal-Id: ID do canal para Push API (alternativo a wabaId)
         """
         headers = {
             "Content-Type": "application/json",
@@ -88,10 +94,13 @@ class MCPClient:
         # Passa metadados do workspace como cabeçalhos customizados
         api_url = credentials.get("apiUrl", "").strip()
         waba_id = credentials.get("wabaId", "").strip()
+        canal_id = credentials.get("canal_id", "").strip()  # Campo das credenciais do GapHub
         if api_url:
             headers["X-CRM-Api-Url"] = api_url
         if waba_id:
             headers["X-CRM-Waba-Id"] = waba_id
+        if canal_id:
+            headers["X-CRM-Canal-Id"] = canal_id
 
         return headers
 
