@@ -1154,6 +1154,12 @@ async def execute_agent_streaming_queue(
 
     nodes = [n for n in agent.get("nodes", []) if n.get("type") == "tool"]
     tool_defs = build_tool_definitions(nodes, agent=agent)
+    
+    # Se NENHUMA tool disponível (sem nodes, sem skill packs), adiciona as tools padrão do ClickMassa
+    if not tool_defs:
+        from tools import CLICKMASSA_DEFAULT_TOOLS
+        tool_defs = CLICKMASSA_DEFAULT_TOOLS
+        logger.info(f"[execute_agent_streaming] usando tools padrão do ClickMassa: {len(tool_defs)} tools")
 
     if webhook_mode:
         before = len(tool_defs)
@@ -1417,6 +1423,12 @@ async def execute_agent(
     # enabled_skill_packs, or both.
     nodes = [n for n in agent.get("nodes", []) if n.get("type") == "tool"]
     tool_defs = build_tool_definitions(nodes, agent=agent)
+    
+    # Se NENHUMA tool disponível (sem nodes, sem skill packs), adiciona as tools padrão do ClickMassa
+    if not tool_defs:
+        from tools import CLICKMASSA_DEFAULT_TOOLS
+        tool_defs = CLICKMASSA_DEFAULT_TOOLS
+        logger.info(f"[execute_agent] usando tools padrão do ClickMassa: {len(tool_defs)} tools")
 
     # Em modo webhook o agente só pode ENVIAR — ferramentas de busca são bloqueadas.
     # Isso evita o loop "busca histórico → vê resposta própria → responde de novo".

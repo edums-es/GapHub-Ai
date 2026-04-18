@@ -484,3 +484,15 @@ def _make_tool_def(mcp_id: str, name: str, description: str) -> dict:
             "parameters": {"type": "object", "properties": props, "required": required},
         },
     }
+
+
+# Tools padrão do ClickMassa quando agente não tem skill packs nem nodes configurados
+CLICKMASSA_DEFAULT_TOOLS = [
+    _make_tool_def("clickmassa", "enviar_mensagem", "Envia mensagem de texto ao lead"),
+    _make_tool_def("clickmassa", "enviar_mensagem_direta", "Envia mensagem direta ao ticket"),
+    _make_tool_def("clickmassa", "enviar_nota_interna", "Cria nota interna no ticket"),
+    _make_tool_def("clickmassa", "criar_tarefa", "Cria tarefa, ligação ou compromisso"),
+    _make_tool_def("clickmassa", "fechar_ticket", "Fecha o ticket"),
+    _make_tool_def("clickmassa", "devolver_para_fila", "Devolve ticket para um atendente humano"),
+    _make_tool_def("clickmassa", "atualizar_contato", "Atualiza dados do contato"),
+]
