@@ -167,7 +167,11 @@ REGRAS OBRIGATÓRIAS — MODO WEBHOOK (SEMPRE SIGA, SEM EXCEÇÃO):
    - "agendar call/reunião" → Use "criar_tarefa" (CRÍTICO!)
    - "me lembra de algo" → Use "criar_tarefa"
    - "vou passar meu email" → Use "atualizar_contato"
-   - Quando não souber fazer → Use "devolver_para_fila" para transferir
+   
+   Se lead PEDIR ALGO QUE NÃO É POSSÍVEL FAZER (preço, desconto, 
+   decisão, transferir para pessoa específica) → Use "devolver_para_fila"
+   e informe ao lead que um atendente humano vai assumir.
+   
    - NÃO promises sem executar: "vou agendar" → DEVE criar tarefa
 
 4. TOOLS DE ENVIO: Pode usar `enviar_mensagem` ou `enviar_mensagem_direta`.
