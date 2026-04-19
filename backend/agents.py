@@ -920,6 +920,122 @@ async def delete_agent_mcp_credentials(request: Request, agent_id: str):
     return {"message": "Credenciais MCP do agente removidas."}
 
 
+@agents_router.post("/agents/{agent_id}/mcp-credentials/test")
+async def test_agent_mcp_credentials(request: Request, agent_id: str):
+    """
+    Testa as credenciais ClickMassa do agente sem enviar mensagem pra ninguém.
+    Chama um endpoint read-only (list channels / buscar contato) e reporta se:
+      - apiUrl está acessível
+      - userToken é aceito (não 401/403)
+      - canal_id/wabaId está configurado e responde
+    Retorna {ok: bool, details: {...}} pra UI exibir de forma clara.
+    """
+    import httpx
+    user = await get_current_user(request)
+    db = request.app.state.db
+    agent = await db.agents.find_one(
+        {"agent_id": agent_id, "workspace_id": user["workspace_id"]}, {"_id": 0}
+    )
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+
+    # Monta as mesmas credenciais que o webhook usa — primeiro agent-level, com
+    # fallback para workspace-level (db.credentials).
+    workspace_id = agent.get("workspace_id", "")
+    creds = None
+    source = None
+    try:
+        agent_creds = await _get_agent_mcp_credentials(db, agent_id)
+        if agent_creds and (agent_creds.get("userToken") or agent_creds.get("apiUrl")):
+            creds = agent_creds
+            source = "agent"
+    except Exception:
+        pass
+    if not creds:
+        try:
+            ws_cred = await db.credentials.find_one({"workspace_id": workspace_id, "mcp_id": "clickmassa"})
+            if ws_cred:
+                decrypted = {}
+                for k, v in (ws_cred.get("data", {}) or {}).items():
+                    try:
+                        decrypted[k] = decrypt(str(v))
+                    except Exception:
+                        decrypted[k] = v
+                creds = decrypted
+                source = "workspace"
+        except Exception:
+            pass
+
+    if not creds:
+        return {
+            "ok": False,
+            "source": None,
+            "error": "Nenhuma credencial ClickMassa configurada para este agente nem para o workspace.",
+            "next_step": "Configure apiUrl + userToken nas credenciais do agente ou em Configurações do workspace.",
+        }
+
+    api_url = (creds.get("apiUrl") or creds.get("base_url") or "").rstrip("/")
+    token = creds.get("userToken") or creds.get("token") or ""
+    waba_id = creds.get("wabaId") or ""
+    canal_id = creds.get("canal_id") or ""
+
+    details = {
+        "source": source,
+        "apiUrl": api_url or "(vazio)",
+        "has_token": bool(token),
+        "token_tail": ("••••" + token[-4:]) if len(token) >= 4 else "(vazio)",
+        "wabaId": waba_id or "(não configurado)",
+        "canal_id": canal_id or "(não configurado)",
+    }
+
+    if not api_url:
+        return {"ok": False, "details": details, "error": "apiUrl vazio — defina a URL da instância ClickMassa."}
+    if not token:
+        return {"ok": False, "details": details, "error": "userToken vazio — cole o token Bearer da ClickMassa."}
+
+    # Teste read-only: GET /tickets?status=pending (minimal) — se retornar 2xx, token OK.
+    # Evita usar /v1/api/external/{canal_id} porque isso ENVIARIA mensagem.
+    test_url = f"{api_url}/tickets?status=pending&showAll=true"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            resp = await c.get(test_url, headers=headers)
+        details["test_endpoint"] = test_url
+        details["test_status"] = resp.status_code
+        if resp.status_code == 401:
+            return {
+                "ok": False, "details": details,
+                "error": "401 Unauthorized — o token não é aceito pela instância. Gere um novo em ClickMassa → Perfil → Token.",
+            }
+        if resp.status_code == 403:
+            return {
+                "ok": False, "details": details,
+                "error": "403 Forbidden — o token existe mas não tem permissão. Verifique com o admin da ClickMassa.",
+            }
+        if resp.status_code >= 400:
+            body_preview = (resp.text or "")[:200]
+            return {
+                "ok": False, "details": details,
+                "error": f"ClickMassa respondeu {resp.status_code}: {body_preview}",
+            }
+    except Exception as e:
+        return {
+            "ok": False, "details": details,
+            "error": f"Erro ao conectar na ClickMassa: {e}. Verifique apiUrl e conectividade.",
+        }
+
+    # Se o canal_id não estiver configurado, o envio pela Push API vai falhar.
+    # A gente não bloqueia o teste, só avisa — porque o token pode ser válido.
+    warning = None
+    if not canal_id and not waba_id:
+        warning = (
+            "Token OK, mas canal_id/wabaId não configurado — o envio via Push API "
+            "vai falhar. Pegue o ID do canal em ClickMassa → Canais → WhatsApp."
+        )
+
+    return {"ok": True, "details": details, "warning": warning, "message": "Token aceito pela ClickMassa."}
+
+
 async def _get_agent_mcp_credentials(db, agent_id: str) -> Optional[dict]:
     """
     Helper interno: retorna credenciais MCP decriptadas para um agente específico.
@@ -2333,7 +2449,20 @@ async def webhook_trigger(
                 except Exception as send_err:
                     logger.error(f"[Webhook {agent_id}] fallback FALHOU: {send_err}", exc_info=True)
             elif not sent_via_tool:
-                logger.warning(f"[Webhook {agent_id}] fallback ignorado: credenciais clickmassa não encontradas. creds keys={list(workspace_creds.keys())}")
+                # Diferencia os dois motivos possíveis do fallback não disparar:
+                # 1) O workflow JÁ TENTOU enviar (e falhou/pulou) — não redobra envio.
+                # 2) Não há credenciais ClickMassa configuradas — envio realmente impossível.
+                if workflow_attempted_send:
+                    logger.warning(
+                        f"[Webhook {agent_id}] fallback NÃO executado: o workflow já tentou enviar (send_message). "
+                        f"Se houve erro 401/403 do ClickMassa, teste o userToken em Agent Builder → "
+                        f"MCP Credentials → 'Testar conexão'. O fallback não redobra o envio."
+                    )
+                else:
+                    logger.warning(
+                        f"[Webhook {agent_id}] fallback ignorado: credenciais clickmassa não encontradas. "
+                        f"creds keys={list(workspace_creds.keys())}"
+                    )
 
             # Registra timestamp da última resposta para alimentar o cooldown da Camada 1.5.
             # Uma resposta foi considerada enviada se:

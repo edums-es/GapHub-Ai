@@ -512,11 +512,18 @@ export default function AgentBuilder() {
   const [showMcpCredsForm, setShowMcpCredsForm] = useState(false);
   const [mcpCredsForm, setMcpCredsForm] = useState({ apiUrl: "", userToken: "", wabaId: "" });
   const [savingMcpCreds, setSavingMcpCreds] = useState(false);
+  // Diagnóstico ClickMassa: testa se o userToken é aceito sem enviar mensagem real.
+  const [testingConn, setTestingConn] = useState(false);
+  const [testResult, setTestResult] = useState(null); // {ok, details, error, warning, message}
   // Skill packs habilitados no agente (nós condicionados)
   const [enabledSkillPacks, setEnabledSkillPacks] = useState([]);
   // Workflow vinculado ao agente (engine determinística)
   const [workflowId, setWorkflowId] = useState("");
   const [availableWorkflows, setAvailableWorkflows] = useState([]);
+  const [workflowTemplates, setWorkflowTemplates] = useState([]);
+  const [showLinkExisting, setShowLinkExisting] = useState(false);
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false);
+  const [creatingWorkflow, setCreatingWorkflow] = useState(false);
 
   // Bug Fix #5 — Zoom/Pan: controles de zoom e pan no canvas via CSS transform
   const [zoom, setZoom] = useState(1.0);
@@ -576,6 +583,10 @@ export default function AgentBuilder() {
       axios.get(`${API}/workflows`, { withCredentials: true })
         .then(r => setAvailableWorkflows(r.data?.workflows || []))
         .catch(() => setAvailableWorkflows([]));
+      // Templates de workflow (atendimento, qualificação, FAQ)
+      axios.get(`${API}/workflow-templates`, { withCredentials: true })
+        .then(r => setWorkflowTemplates(r.data?.templates || []))
+        .catch(() => setWorkflowTemplates([]));
       // Carrega info de webhook (sem exibir o secret)
       axios.get(`${API}/agents/${agentId}/webhook-info`, { withCredentials: true })
         .then(r => setWebhookInfo(r.data))
@@ -693,6 +704,80 @@ export default function AgentBuilder() {
     }
   };
 
+  // ---- Helpers de workflow (criar/vincular direto do agente) ----
+  const persistWorkflowIdOnAgent = async (wfId) => {
+    // Salva o vínculo sem acionar validação completa do agente (muitos fluxos ainda sem LLM)
+    try {
+      await axios.put(
+        `${API}/agents/${agentId}`,
+        { name: agentName, nodes, edges, llm_config: llmConfig, enabled_skill_packs: enabledSkillPacks, workflow_id: wfId },
+        { withCredentials: true },
+      );
+    } catch (_) { /* ignora — vínculo fica no estado local e será salvo no próximo Save */ }
+  };
+
+  const createBlankWorkflowAndOpen = async () => {
+    if (creatingWorkflow) return;
+    setCreatingWorkflow(true);
+    try {
+      const { data } = await axios.post(
+        `${API}/workflows`,
+        {
+          name: `Workflow — ${agentName || "Agente"}`,
+          description: "",
+          trigger_type: "webhook",
+          nodes: [
+            { id: "trigger", type: "trigger", label: "Início", position: { x: 0, y: 0 }, config: {}, next: "end" },
+            { id: "end", type: "end", label: "Fim", position: { x: 0, y: 0 }, config: {} },
+          ],
+        },
+        { withCredentials: true },
+      );
+      setWorkflowId(data.workflow_id);
+      await persistWorkflowIdOnAgent(data.workflow_id);
+      navigate(`/workflows/${data.workflow_id}?from=agent&agentId=${agentId}`);
+    } catch (e) {
+      alert(e.response?.data?.detail?.message || e.response?.data?.detail || "Erro ao criar workflow");
+    } finally {
+      setCreatingWorkflow(false);
+    }
+  };
+
+  const createFromTemplateAndOpen = async (templateId) => {
+    if (creatingWorkflow) return;
+    setCreatingWorkflow(true);
+    try {
+      const { data } = await axios.post(
+        `${API}/workflows/from-template/${templateId}`,
+        {},
+        { withCredentials: true },
+      );
+      setWorkflowId(data.workflow_id);
+      await persistWorkflowIdOnAgent(data.workflow_id);
+      setShowTemplatePicker(false);
+      navigate(`/workflows/${data.workflow_id}?from=agent&agentId=${agentId}`);
+    } catch (e) {
+      alert(e.response?.data?.detail || "Erro ao criar workflow do template");
+    } finally {
+      setCreatingWorkflow(false);
+    }
+  };
+
+  const linkExistingWorkflow = async (wfId) => {
+    setWorkflowId(wfId);
+    setShowLinkExisting(false);
+    if (wfId) await persistWorkflowIdOnAgent(wfId);
+    else await persistWorkflowIdOnAgent("");
+  };
+
+  const unlinkWorkflow = async () => {
+    if (!window.confirm("Desvincular este workflow? O agente voltará ao modo prompt tradicional (LLM puro).")) return;
+    setWorkflowId("");
+    await persistWorkflowIdOnAgent("");
+  };
+
+  const linkedWorkflow = availableWorkflows.find(w => w.workflow_id === workflowId);
+
   if (loading) {
     return (
       <Layout>
@@ -716,54 +801,218 @@ export default function AgentBuilder() {
             ))}
           </div>
         )}
-        {/* Workflow link banner */}
+        {/* Workflow — surface única dentro do agente */}
         {!isNew && (
-          <div style={{
-            display: "flex", alignItems: "center", gap: 10, marginBottom: 8,
-            padding: "8px 12px",
-            background: workflowId ? "rgba(249,115,22,0.08)" : "#121212",
-            border: `1px solid ${workflowId ? "rgba(249,115,22,0.3)" : "#27272A"}`,
-            borderRadius: 8,
-          }}>
-            <div style={{ fontSize: 11, color: "#737373", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>
-              Workflow
-            </div>
-            <select
-              value={workflowId}
-              onChange={(e) => setWorkflowId(e.target.value)}
-              style={{
-                flex: 1, padding: "6px 10px", background: "#1A1A1A",
-                border: "1px solid #27272A", borderRadius: 6, color: "white",
-                fontSize: 13, outline: "none", cursor: "pointer",
-              }}
-            >
-              <option value="">— Nenhum (usa modo LLM tradicional) —</option>
-              {availableWorkflows.map(w => (
-                <option key={w.workflow_id} value={w.workflow_id}>{w.name}</option>
-              ))}
-            </select>
-            <button
-              onClick={() => navigate("/workflows")}
-              style={{
-                padding: "6px 10px", background: "transparent",
-                border: "1px solid #27272A", borderRadius: 6,
-                color: "#A3A3A3", fontSize: 12, cursor: "pointer",
-              }}
-            >
-              Gerenciar
-            </button>
-            {workflowId && (
+          workflowId ? (
+            // Estado LIGADO: compacto, mostra nome + Editar + Desvincular
+            <div style={{
+              display: "flex", alignItems: "center", gap: 10, marginBottom: 10,
+              padding: "10px 14px",
+              background: "rgba(249,115,22,0.08)",
+              border: "1px solid rgba(249,115,22,0.3)",
+              borderRadius: 10,
+            }}>
+              <div style={{ width: 32, height: 32, borderRadius: 8, background: "rgba(249,115,22,0.2)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <Zap size={16} color="#F97316" />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, color: "#F97316", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 2 }}>
+                  Fluxo determinístico ativo
+                </div>
+                <div style={{ fontSize: 14, color: "white", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {linkedWorkflow?.name || "Workflow vinculado"}
+                </div>
+              </div>
               <button
-                onClick={() => navigate(`/workflows/${workflowId}`)}
+                onClick={() => navigate(`/workflows/${workflowId}?from=agent&agentId=${agentId}`)}
                 style={{
-                  padding: "6px 10px", background: "rgba(249,115,22,0.12)",
-                  border: "1px solid rgba(249,115,22,0.3)", borderRadius: 6,
-                  color: "#F97316", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                  padding: "8px 14px", background: "rgba(249,115,22,0.15)",
+                  border: "1px solid rgba(249,115,22,0.4)", borderRadius: 8,
+                  color: "#F97316", fontSize: 13, fontWeight: 600, cursor: "pointer",
                 }}
               >
-                Editar
+                Editar fluxo
               </button>
-            )}
+              <button
+                onClick={unlinkWorkflow}
+                style={{
+                  padding: "8px 12px", background: "transparent",
+                  border: "1px solid #27272A", borderRadius: 8,
+                  color: "#A3A3A3", fontSize: 12, cursor: "pointer",
+                }}
+              >
+                Desvincular
+              </button>
+            </div>
+          ) : (
+            // Estado DESLIGADO: card primário com 3 CTAs claros
+            <div style={{
+              marginBottom: 10, padding: "16px 18px",
+              background: "linear-gradient(135deg, rgba(249,115,22,0.06), rgba(249,115,22,0.02))",
+              border: "1px solid rgba(249,115,22,0.25)",
+              borderRadius: 12,
+            }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 14 }}>
+                <div style={{ width: 36, height: 36, borderRadius: 10, background: "rgba(249,115,22,0.15)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <Zap size={18} color="#F97316" />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 14, color: "white", fontWeight: 700, marginBottom: 3, fontFamily: "Outfit, sans-serif" }}>
+                    Turbine este agente com um fluxo passo a passo
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "#A3A3A3", lineHeight: 1.5 }}>
+                    Sem fluxo, o agente responde 100% pela IA (imprevisível). Com um fluxo, você define a ordem exata: "receber mensagem → classificar → responder → enviar no WhatsApp". Escolha como começar:
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  onClick={createBlankWorkflowAndOpen}
+                  disabled={creatingWorkflow}
+                  style={{
+                    flex: "1 1 200px", padding: "12px 14px",
+                    background: "rgba(249,115,22,0.15)", border: "1px solid rgba(249,115,22,0.4)",
+                    borderRadius: 10, color: "#F97316", fontSize: 13, fontWeight: 600, cursor: creatingWorkflow ? "wait" : "pointer",
+                    display: "flex", alignItems: "center", gap: 8,
+                  }}
+                >
+                  <Plus size={16} />
+                  <div style={{ textAlign: "left" }}>
+                    <div>Criar do zero</div>
+                    <div style={{ fontSize: 11, color: "#A3A3A3", fontWeight: 400 }}>Começar com fluxo em branco</div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => setShowTemplatePicker(true)}
+                  disabled={creatingWorkflow || workflowTemplates.length === 0}
+                  style={{
+                    flex: "1 1 200px", padding: "12px 14px",
+                    background: "#121212", border: "1px solid #27272A",
+                    borderRadius: 10, color: "white", fontSize: 13, fontWeight: 600, cursor: creatingWorkflow ? "wait" : "pointer",
+                    display: "flex", alignItems: "center", gap: 8,
+                  }}
+                >
+                  <Layers size={16} color="#F97316" />
+                  <div style={{ textAlign: "left" }}>
+                    <div>Usar template</div>
+                    <div style={{ fontSize: 11, color: "#A3A3A3", fontWeight: 400 }}>{workflowTemplates.length} prontos (atendimento, lead, FAQ)</div>
+                  </div>
+                </button>
+                {availableWorkflows.length > 0 && (
+                  <button
+                    onClick={() => setShowLinkExisting(true)}
+                    style={{
+                      flex: "1 1 200px", padding: "12px 14px",
+                      background: "#121212", border: "1px solid #27272A",
+                      borderRadius: 10, color: "white", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                      display: "flex", alignItems: "center", gap: 8,
+                    }}
+                  >
+                    <ArrowLeft size={16} style={{ transform: "rotate(180deg)" }} color="#A3A3A3" />
+                    <div style={{ textAlign: "left" }}>
+                      <div>Vincular existente</div>
+                      <div style={{ fontSize: 11, color: "#A3A3A3", fontWeight: 400 }}>{availableWorkflows.length} workflow(s) salvos</div>
+                    </div>
+                  </button>
+                )}
+              </div>
+            </div>
+          )
+        )}
+
+        {/* Modal: escolher template */}
+        {showTemplatePicker && (
+          <div
+            onClick={() => setShowTemplatePicker(false)}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+          >
+            <div
+              onClick={e => e.stopPropagation()}
+              style={{ width: "100%", maxWidth: 640, maxHeight: "80vh", overflow: "auto", background: "#0F0F0F", border: "1px solid #27272A", borderRadius: 14, padding: 20 }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                <div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: "white", fontFamily: "Outfit, sans-serif" }}>Escolher template</div>
+                  <div style={{ fontSize: 12, color: "#A3A3A3", marginTop: 2 }}>Fluxos prontos que você pode editar depois</div>
+                </div>
+                <button onClick={() => setShowTemplatePicker(false)} style={{ background: "transparent", border: "none", color: "#A3A3A3", cursor: "pointer" }}>
+                  <X size={18} />
+                </button>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {workflowTemplates.length === 0 && (
+                  <div style={{ padding: 20, textAlign: "center", color: "#737373", fontSize: 13 }}>
+                    Nenhum template disponível no momento.
+                  </div>
+                )}
+                {workflowTemplates.map(t => (
+                  <button
+                    key={t.template_id || t.id}
+                    onClick={() => createFromTemplateAndOpen(t.template_id || t.id)}
+                    disabled={creatingWorkflow}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 12,
+                      padding: "14px 16px",
+                      background: "#141414", border: "1px solid #27272A",
+                      borderRadius: 10, cursor: creatingWorkflow ? "wait" : "pointer",
+                      textAlign: "left",
+                      transition: "all 0.15s",
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(249,115,22,0.4)"; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = "#27272A"; }}
+                  >
+                    <div style={{ fontSize: 24 }}>{({ atendimento_whatsapp: "💬", qualificacao_lead: "🎯", faq_inteligente: "📚" })[t.template_id || t.id] || "⚙️"}</div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 14, color: "white", fontWeight: 600, marginBottom: 2 }}>{t.name}</div>
+                      <div style={{ fontSize: 12, color: "#A3A3A3", lineHeight: 1.4 }}>{t.description}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal: vincular existente */}
+        {showLinkExisting && (
+          <div
+            onClick={() => setShowLinkExisting(false)}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+          >
+            <div
+              onClick={e => e.stopPropagation()}
+              style={{ width: "100%", maxWidth: 520, maxHeight: "80vh", overflow: "auto", background: "#0F0F0F", border: "1px solid #27272A", borderRadius: 14, padding: 20 }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                <div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: "white", fontFamily: "Outfit, sans-serif" }}>Vincular workflow existente</div>
+                  <div style={{ fontSize: 12, color: "#A3A3A3", marginTop: 2 }}>Reaproveita um fluxo que você já criou</div>
+                </div>
+                <button onClick={() => setShowLinkExisting(false)} style={{ background: "transparent", border: "none", color: "#A3A3A3", cursor: "pointer" }}>
+                  <X size={18} />
+                </button>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {availableWorkflows.map(w => (
+                  <button
+                    key={w.workflow_id}
+                    onClick={() => linkExistingWorkflow(w.workflow_id)}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 10,
+                      padding: "11px 14px",
+                      background: "#141414", border: "1px solid #27272A",
+                      borderRadius: 8, cursor: "pointer", textAlign: "left",
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = "rgba(249,115,22,0.4)"; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = "#27272A"; }}
+                  >
+                    <Zap size={14} color="#F97316" />
+                    <div style={{ flex: 1, fontSize: 13, color: "white", fontWeight: 500 }}>{w.name}</div>
+                    <div style={{ fontSize: 11, color: "#737373" }}>{(w.nodes || []).length} passos</div>
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         )}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
@@ -1008,6 +1257,55 @@ export default function AgentBuilder() {
                     {mcpCredsInfo.updated_at && (
                       <div style={{ fontSize: 9, color: "#404040", marginTop: 2 }}>
                         Atualizado: {new Date(mcpCredsInfo.updated_at).toLocaleDateString("pt-BR")}
+                      </div>
+                    )}
+                    {/* Botão de diagnóstico: valida userToken sem enviar mensagem real */}
+                    <button
+                      onClick={async () => {
+                        setTestingConn(true);
+                        setTestResult(null);
+                        try {
+                          const r = await axios.post(`${API}/agents/${agent.agent_id}/mcp-credentials/test`, {}, { withCredentials: true });
+                          setTestResult(r.data);
+                        } catch (e) {
+                          setTestResult({ ok: false, error: e.response?.data?.detail || e.message || "Falha ao testar conexão." });
+                        }
+                        setTestingConn(false);
+                      }}
+                      disabled={testingConn}
+                      style={{ width: "100%", marginTop: 8, padding: "5px", background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.3)", borderRadius: 6, color: "#60A5FA", fontSize: 10, cursor: testingConn ? "wait" : "pointer", fontWeight: 600 }}
+                    >{testingConn ? "Testando..." : "Testar conexão ClickMassa"}</button>
+                    {testResult && (
+                      <div style={{ marginTop: 6, padding: "6px 8px", background: testResult.ok ? "rgba(16,185,129,0.08)" : "rgba(239,68,68,0.08)", border: `1px solid ${testResult.ok ? "rgba(16,185,129,0.3)" : "rgba(239,68,68,0.3)"}`, borderRadius: 6 }}>
+                        <div style={{ fontSize: 10, color: testResult.ok ? "#10B981" : "#EF4444", fontWeight: 700, marginBottom: 3 }}>
+                          {testResult.ok ? "✓ Token aceito" : "✗ Falhou"}
+                        </div>
+                        {testResult.error && (
+                          <div style={{ fontSize: 9, color: "#FCA5A5", lineHeight: 1.4, wordBreak: "break-word" }}>
+                            {testResult.error}
+                          </div>
+                        )}
+                        {testResult.message && (
+                          <div style={{ fontSize: 9, color: "#A7F3D0", lineHeight: 1.4 }}>
+                            {testResult.message}
+                          </div>
+                        )}
+                        {testResult.warning && (
+                          <div style={{ fontSize: 9, color: "#FBBF24", lineHeight: 1.4, marginTop: 3 }}>
+                            ⚠ {testResult.warning}
+                          </div>
+                        )}
+                        {testResult.details && (
+                          <div style={{ fontSize: 9, color: "#737373", marginTop: 4, lineHeight: 1.4, fontFamily: "IBM Plex Mono, monospace" }}>
+                            <div>origem: {testResult.details.source || "?"}</div>
+                            <div>apiUrl: {testResult.details.apiUrl}</div>
+                            <div>token: {testResult.details.token_tail}</div>
+                            <div>canal_id: {testResult.details.canal_id}</div>
+                            {testResult.details.test_status !== undefined && (
+                              <div>http: {testResult.details.test_status}</div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
