@@ -1985,6 +1985,26 @@ async def webhook_trigger(
 
     logger.info(f"[Webhook {agent_id}] extraído: input='{user_input[:60]}' ticket_id='{ticket_id}' contact_number='{contact_number}' contact_name='{contact_name}'")
 
+    # ── Guard: grupos do WhatsApp NÃO devem ser respondidos pelo agente ──────
+    # Push API só envia para DMs (números pessoais de 10-13 dígitos). Se o
+    # contact_number for JID de grupo (18+ dígitos ou @g.us), o webhook dispara
+    # para cada mensagem no grupo e o bot fica gerando respostas internas que
+    # nunca chegam em lugar nenhum. Bloqueia antes de consumir LLM tokens.
+    _cn_clean = str(contact_number or "").replace("@g.us", "").replace("@c.us", "")
+    is_group_chat = (
+        "@g.us" in str(contact_number or "")
+        or (_cn_clean.isdigit() and len(_cn_clean) >= 15)
+        or str(ticket_obj.get("status", "")).lower() == "group"
+        or bool(ticket_obj.get("isGroup"))
+    )
+    if is_group_chat:
+        logger.info(
+            f"[Webhook {agent_id}] ignorado: chat de GRUPO detectado "
+            f"(contact_number='{contact_number}', ticket_status='{ticket_obj.get('status')}'). "
+            f"Push API só envia DMs — agente não atende grupos."
+        )
+        return {"status": "ignored", "reason": "Chat de grupo — agente só atende DMs"}
+
     # Log completo dos campos relevantes para o gate — facilita diagnóstico
     # quando o bot "parar de responder".
     _ticket_user = ticket_obj.get("user") if isinstance(ticket_obj.get("user"), dict) else {}
@@ -2222,6 +2242,22 @@ async def webhook_trigger(
                         f"[Webhook {agent_id}] workflow {workflow_id} rodou em "
                         f"{wf_result.get('duration_ms')}ms com {len(steps)} steps"
                     )
+                    # Surface clara quando o send_message do workflow falhou — evita
+                    # que a mensagem suma sem rastro. Geralmente é 403 Invalid token
+                    # (credenciais ClickMassa) ou JID de grupo.
+                    for s in steps:
+                        if s.get("tool") == "send_message":
+                            res = s.get("result") or {}
+                            if isinstance(res, dict) and res.get("status") == "error":
+                                logger.error(
+                                    f"[Webhook {agent_id}] ❌ send_message do workflow FALHOU: "
+                                    f"{res.get('error', '')[:300]} — verifique userToken/apiUrl do agente"
+                                )
+                            elif isinstance(res, dict) and res.get("status") == "skipped":
+                                logger.warning(
+                                    f"[Webhook {agent_id}] ⚠ send_message do workflow PULOU: "
+                                    f"{res.get('reason', '')} — {res.get('detail', '')}"
+                                )
 
             # ── Modo LEGADO (LLM free-form) — usado quando não há workflow_id.
             if not used_workflow:
@@ -2242,8 +2278,32 @@ async def webhook_trigger(
             # envia a resposta programaticamente via Push API (enviar_mensagem) — NUNCA
             # via enviar_mensagem_direta, que registra a mensagem como se fosse do lead
             # no CRM (bug descoberto em 2026-04-18: POST /messages/{id} sem flag de empresa).
-            sent_via_tool = any("enviar_mensagem" in s.get("tool", "") for s in steps)
-            if not sent_via_tool and workspace_creds.get("clickmassa"):
+            #
+            # IMPORTANTE: quando o agente rodou em MODO WORKFLOW (engine determinística),
+            # o step tem tool=node_type ("send_message") e NÃO "enviar_mensagem". Sem checar
+            # os dois, o fallback dispara por cima do send_message do workflow → mensagem duplicada.
+            def _step_sent_message(step):
+                tool_name = step.get("tool", "") or ""
+                # Free-form LLM: tool real do MCP
+                if "enviar_mensagem" in tool_name:
+                    return step.get("result") and not (
+                        isinstance(step.get("result"), dict) and step["result"].get("error")
+                    )
+                # Workflow engine: node_type="send_message" + result.status=ok|skipped
+                if tool_name == "send_message":
+                    res = step.get("result") or {}
+                    if isinstance(res, dict):
+                        return res.get("status") in ("ok", "skipped")
+                return False
+
+            sent_via_tool = any(_step_sent_message(s) for s in steps)
+            # Se rodou em workflow E o send_message do workflow falhou/skippou, ainda queremos
+            # evitar fallback duplicado — o workflow é AUTORITATIVO. Caso contrário, o Eduardo
+            # receberia a mensagem duas vezes sempre que o token estiver correto.
+            workflow_attempted_send = used_workflow and any(
+                (s.get("tool") == "send_message") for s in steps
+            )
+            if not sent_via_tool and not workflow_attempted_send and workspace_creds.get("clickmassa"):
                 creds_cm = workspace_creds["clickmassa"]
                 send_result = None
                 try:

@@ -303,6 +303,71 @@ async def test_execute_workflow_send_message_uses_push_api():
     assert result["output"] == "olá!"
 
 
+@pytest.mark.asyncio
+async def test_send_message_skips_group_jids():
+    """JIDs de grupo do WhatsApp (18+ dígitos) não podem receber Push API — precisam ser pulados."""
+    from workflow_engine import execute_workflow
+
+    tool_mock = AsyncMock(return_value={"ok": True})
+    wf = {
+        "workflow_id": "group",
+        "nodes": [
+            {"id": "start", "type": "trigger", "next": "send", "config": {}},
+            {"id": "send", "type": "send_message", "next": "end", "config": {"message": "olá"}},
+            {"id": "end", "type": "end", "config": {}},
+        ],
+    }
+    context = {
+        "input": "x",
+        "ticket_id": "1",
+        "contact_number": "120363426150235401",  # JID de grupo típico
+        "variables": {},
+        "steps": [],
+    }
+    deps = {"execute_tool": tool_mock, "workspace_creds": {"clickmassa": {}}}
+
+    result = await execute_workflow(wf, context, deps)
+
+    tool_mock.assert_not_called()
+    send_step = next(s for s in result["steps"] if s.get("node_id") == "send")
+    assert send_step["result"]["status"] == "skipped"
+    assert send_step["result"]["reason"] == "group_jid"
+
+
+@pytest.mark.asyncio
+async def test_send_message_propagates_clickmassa_403():
+    """Quando a ClickMassa rejeita (403 Invalid token), send_message deve marcar status=error."""
+    from workflow_engine import execute_workflow
+
+    # Simula resposta real da ClickMassa quando o token é inválido
+    tool_mock = AsyncMock(return_value={
+        "output": "ClickMassa POST /v1/api/external/abc → 403: {\"error\":\"Invalid token.\"}"
+    })
+    wf = {
+        "workflow_id": "err",
+        "nodes": [
+            {"id": "start", "type": "trigger", "next": "send", "config": {}},
+            {"id": "send", "type": "send_message", "next": "end", "config": {"message": "oi"}},
+            {"id": "end", "type": "end", "config": {}},
+        ],
+    }
+    context = {
+        "input": "x",
+        "ticket_id": "1",
+        "contact_number": "5511999887766",
+        "variables": {},
+        "steps": [],
+    }
+    deps = {"execute_tool": tool_mock, "workspace_creds": {"clickmassa": {}}}
+
+    result = await execute_workflow(wf, context, deps)
+
+    tool_mock.assert_called_once()
+    send_step = next(s for s in result["steps"] if s.get("node_id") == "send")
+    assert send_step["result"]["status"] == "error"
+    assert "Invalid token" in send_step["result"]["error"]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # classify_intent — com LLM mockado
 # ─────────────────────────────────────────────────────────────────────────────

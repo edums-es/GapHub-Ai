@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
-import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
 import {
   ArrowLeft, Save, Play, Plus, Trash2, Zap, GitBranch, Brain, MessageSquare,
@@ -100,9 +100,6 @@ const CLICKMASSA_TOOLS = [
 export default function WorkflowBuilder() {
   const { workflowId } = useParams();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const fromAgent = searchParams.get("from") === "agent";
-  const fromAgentId = searchParams.get("agentId") || "";
 
   const [workflow, setWorkflow] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -275,19 +272,10 @@ export default function WorkflowBuilder() {
         {/* Topo */}
         <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 4 }}>
           <button
-            onClick={() => {
-              if (fromAgent && fromAgentId) navigate(`/agents/${fromAgentId}`);
-              else navigate("/agents");
-            }}
-            style={{
-              background: fromAgent ? "rgba(249,115,22,0.1)" : "transparent",
-              border: `1px solid ${fromAgent ? "rgba(249,115,22,0.3)" : "#27272A"}`,
-              borderRadius: 8, color: fromAgent ? "#F97316" : "#A3A3A3",
-              padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
-              fontSize: 13, fontWeight: 600,
-            }}
+            onClick={() => navigate("/workflows")}
+            style={{ background: "transparent", border: "1px solid #27272A", borderRadius: 8, color: "#A3A3A3", padding: "8px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}
           >
-            <ArrowLeft size={14} /> {fromAgent ? "Voltar ao agente" : "Voltar aos agentes"}
+            <ArrowLeft size={14} /> Voltar
           </button>
           <div style={{ flex: 1, minWidth: 0 }}>
             <input

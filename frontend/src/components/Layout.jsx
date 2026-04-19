@@ -3,12 +3,14 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   LayoutDashboard, Bot, Store, Play, Settings, LogOut,
-  ChevronLeft, ChevronRight, Zap, User, Menu, X, Calendar, Shield, MessageSquare
+  ChevronLeft, ChevronRight, Zap, User, Menu, X, Calendar, Shield, MessageSquare,
+  Workflow
 } from "lucide-react";
 
 const NAV_ITEMS = [
   { path: "/dashboard",  label: "Dashboard",    icon: LayoutDashboard },
   { path: "/agents",     label: "Meus Agentes", icon: Bot },
+  { path: "/workflows",  label: "Workflows",    icon: Workflow },
   { path: "/chat",       label: "Chat",         icon: MessageSquare },
   { path: "/marketplace",label: "Marketplace",  icon: Store },
   { path: "/schedules",  label: "Agendamentos", icon: Calendar },

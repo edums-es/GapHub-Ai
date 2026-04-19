@@ -359,7 +359,15 @@ async def _exec_send_message(node: Dict[str, Any], context: Dict[str, Any], deps
       use_push_api: True (default — garante que aparece como empresa no CRM)
     """
     config = node.get("config") or {}
-    template = config.get("message") or "{{reply}}" if context.get("variables", {}).get("reply") else "{{output}}"
+    # Prioridade: config.message → {{reply}} (se variável existe) → {{output}}
+    # (Bug fix: o `a or b if c else d` anterior era parseado como `(a or b) if c else d`,
+    # descartando config.message quando reply não estava setada.)
+    if config.get("message"):
+        template = config["message"]
+    elif context.get("variables", {}).get("reply"):
+        template = "{{reply}}"
+    else:
+        template = "{{output}}"
     mensagem = render_template(template, context)
     if not mensagem:
         return {"status": "skipped", "reason": "mensagem vazia"}
@@ -374,6 +382,17 @@ async def _exec_send_message(node: Dict[str, Any], context: Dict[str, Any], deps
         return {"status": "error", "error": "execute_tool não provida"}
 
     if numero:
+        # Bloqueia envio para JIDs de GRUPO do WhatsApp (ex: 120363426150235401).
+        # Grupos têm 18+ dígitos e começam com 1203, ou vêm com sufixo @g.us.
+        # Push API só envia para DMs (números pessoais de 10-13 dígitos).
+        numero_limpo = str(numero).replace("@g.us", "").replace("@c.us", "")
+        if "@g.us" in str(numero) or (numero_limpo.isdigit() and len(numero_limpo) >= 15):
+            logger.warning(f"[workflow send_message] ignorado: JID de grupo '{numero}' — Push API só envia para DMs")
+            return {
+                "status": "skipped",
+                "reason": "group_jid",
+                "detail": f"numero='{numero}' parece ser JID de grupo (Push API aceita apenas DMs)",
+            }
         params = {"numero": numero, "mensagem": mensagem}
         tool = "enviar_mensagem"
     elif ticket_id:
@@ -387,6 +406,32 @@ async def _exec_send_message(node: Dict[str, Any], context: Dict[str, Any], deps
     except Exception as e:
         logger.error(f"[workflow send_message] falhou: {e}", exc_info=True)
         return {"status": "error", "error": str(e)}
+
+    # Detecta falha da ClickMassa: a resposta vem no formato
+    # {"error": "..."} ou {"output": "ClickMassa POST ... → 4xx: ..."}.
+    # Sem isso, um 403 "Invalid token" era silenciosamente reportado como "ok"
+    # e o webhook fazia fallback que também falhava, sem sinalizar o problema.
+    result_text = ""
+    if isinstance(result, dict):
+        if "error" in result:
+            result_text = str(result.get("error", ""))
+        elif "output" in result:
+            result_text = str(result.get("output", ""))
+    else:
+        result_text = str(result)
+
+    failure_markers = ("→ 4", "→ 5", "Invalid token", "Unauthorized", "Forbidden", "http_status")
+    is_failure = isinstance(result, dict) and (
+        "error" in result or any(m in result_text for m in failure_markers)
+    )
+    if is_failure:
+        logger.error(f"[workflow send_message] ClickMassa rejeitou envio: {result_text[:300]}")
+        return {
+            "status": "error",
+            "tool": tool,
+            "error": result_text[:500] or "Envio rejeitado pela ClickMassa",
+            "result_preview": _truncate(result),
+        }
 
     context["output"] = mensagem
     return {"status": "ok", "tool": tool, "mensagem": mensagem, "result_preview": _truncate(result)}
