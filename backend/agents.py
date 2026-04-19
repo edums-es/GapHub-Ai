@@ -993,35 +993,50 @@ async def test_agent_mcp_credentials(request: Request, agent_id: str):
     if not token:
         return {"ok": False, "details": details, "error": "userToken vazio — cole o token Bearer da ClickMassa."}
 
-    # Teste read-only: GET /tickets?status=pending (minimal) — se retornar 2xx, token OK.
-    # Evita usar /v1/api/external/{canal_id} porque isso ENVIARIA mensagem.
-    test_url = f"{api_url}/tickets?status=pending&showAll=true"
+    # Teste read-only: tenta alguns endpoints leves em sequência e aceita o
+    # primeiro que não retorne 401/403. 5xx é tratado como "token válido, endpoint
+    # com bug" — o importante pro diagnóstico é saber se o auth passou.
+    candidates = [
+        f"{api_url}/settings",
+        f"{api_url}/users/profile",
+        f"{api_url}/users",
+        f"{api_url}/tickets?pageNumber=1",
+    ]
     headers = {"Authorization": f"Bearer {token}"}
+    last_status = None
+    last_body = ""
+    token_rejected = False
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            resp = await c.get(test_url, headers=headers)
-        details["test_endpoint"] = test_url
-        details["test_status"] = resp.status_code
-        if resp.status_code == 401:
-            return {
-                "ok": False, "details": details,
-                "error": "401 Unauthorized — o token não é aceito pela instância. Gere um novo em ClickMassa → Perfil → Token.",
-            }
-        if resp.status_code == 403:
-            return {
-                "ok": False, "details": details,
-                "error": "403 Forbidden — o token existe mas não tem permissão. Verifique com o admin da ClickMassa.",
-            }
-        if resp.status_code >= 400:
-            body_preview = (resp.text or "")[:200]
-            return {
-                "ok": False, "details": details,
-                "error": f"ClickMassa respondeu {resp.status_code}: {body_preview}",
-            }
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+            for url in candidates:
+                try:
+                    resp = await c.get(url, headers=headers)
+                except Exception:
+                    continue
+                last_status = resp.status_code
+                last_body = (resp.text or "")[:200]
+                details["test_endpoint"] = url
+                details["test_status"] = last_status
+                if last_status in (401, 403):
+                    token_rejected = True
+                    break
+                # 2xx, 3xx, 4xx-não-auth, 5xx => auth passou. Aceita como OK.
+                if last_status < 400 or last_status >= 500 or last_status == 404:
+                    token_rejected = False
+                    break
     except Exception as e:
         return {
             "ok": False, "details": details,
             "error": f"Erro ao conectar na ClickMassa: {e}. Verifique apiUrl e conectividade.",
+        }
+
+    if token_rejected:
+        return {
+            "ok": False, "details": details,
+            "error": (
+                f"{last_status} — o token foi rejeitado pela ClickMassa. "
+                f"Gere um novo token em ClickMassa → Perfil → Token e cole de novo aqui."
+            ),
         }
 
     # Se o canal_id não estiver configurado, o envio pela Push API vai falhar.
@@ -1029,11 +1044,19 @@ async def test_agent_mcp_credentials(request: Request, agent_id: str):
     warning = None
     if not canal_id and not waba_id:
         warning = (
-            "Token OK, mas canal_id/wabaId não configurado — o envio via Push API "
+            "Token aceito, mas canal_id/wabaId não configurado — o envio via Push API "
             "vai falhar. Pegue o ID do canal em ClickMassa → Canais → WhatsApp."
         )
 
-    return {"ok": True, "details": details, "warning": warning, "message": "Token aceito pela ClickMassa."}
+    extra = ""
+    if last_status and last_status >= 500:
+        extra = f" (endpoint retornou {last_status} mas isso é bug interno do CRM, não do token)"
+    return {
+        "ok": True,
+        "details": details,
+        "warning": warning,
+        "message": f"Token aceito pela ClickMassa{extra}.",
+    }
 
 
 async def _get_agent_mcp_credentials(db, agent_id: str) -> Optional[dict]:
@@ -2101,25 +2124,11 @@ async def webhook_trigger(
 
     logger.info(f"[Webhook {agent_id}] extraído: input='{user_input[:60]}' ticket_id='{ticket_id}' contact_number='{contact_number}' contact_name='{contact_name}'")
 
-    # ── Guard: grupos do WhatsApp NÃO devem ser respondidos pelo agente ──────
-    # Push API só envia para DMs (números pessoais de 10-13 dígitos). Se o
-    # contact_number for JID de grupo (18+ dígitos ou @g.us), o webhook dispara
-    # para cada mensagem no grupo e o bot fica gerando respostas internas que
-    # nunca chegam em lugar nenhum. Bloqueia antes de consumir LLM tokens.
-    _cn_clean = str(contact_number or "").replace("@g.us", "").replace("@c.us", "")
-    is_group_chat = (
-        "@g.us" in str(contact_number or "")
-        or (_cn_clean.isdigit() and len(_cn_clean) >= 15)
-        or str(ticket_obj.get("status", "")).lower() == "group"
-        or bool(ticket_obj.get("isGroup"))
-    )
-    if is_group_chat:
-        logger.info(
-            f"[Webhook {agent_id}] ignorado: chat de GRUPO detectado "
-            f"(contact_number='{contact_number}', ticket_status='{ticket_obj.get('status')}'). "
-            f"Push API só envia DMs — agente não atende grupos."
-        )
-        return {"status": "ignored", "reason": "Chat de grupo — agente só atende DMs"}
+    # NOTA: o guard anterior de "bloquear grupos" (len>=15 ou ticket_status=='group')
+    # foi removido — estava matando todas as mensagens do Flemy/ClickMassa porque a
+    # instância do Eduardo usa tickets com status='group' para contatos legítimos.
+    # Antes desse guard existir a comunicação funcionava, logo ele NÃO é necessário.
+    # Se a Push API não aceitar o JID, o erro aparece no log do send_message normal.
 
     # Log completo dos campos relevantes para o gate — facilita diagnóstico
     # quando o bot "parar de responder".

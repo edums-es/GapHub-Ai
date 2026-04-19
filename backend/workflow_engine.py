@@ -382,17 +382,10 @@ async def _exec_send_message(node: Dict[str, Any], context: Dict[str, Any], deps
         return {"status": "error", "error": "execute_tool não provida"}
 
     if numero:
-        # Bloqueia envio para JIDs de GRUPO do WhatsApp (ex: 120363426150235401).
-        # Grupos têm 18+ dígitos e começam com 1203, ou vêm com sufixo @g.us.
-        # Push API só envia para DMs (números pessoais de 10-13 dígitos).
-        numero_limpo = str(numero).replace("@g.us", "").replace("@c.us", "")
-        if "@g.us" in str(numero) or (numero_limpo.isdigit() and len(numero_limpo) >= 15):
-            logger.warning(f"[workflow send_message] ignorado: JID de grupo '{numero}' — Push API só envia para DMs")
-            return {
-                "status": "skipped",
-                "reason": "group_jid",
-                "detail": f"numero='{numero}' parece ser JID de grupo (Push API aceita apenas DMs)",
-            }
+        # O skip para JIDs de grupo foi removido: a instância ClickMassa do Eduardo
+        # (Flemy) trata tickets com números de 18 dígitos como alvos válidos da
+        # Push API. Se o endpoint rejeitar, o erro aparece em `result` e é propagado
+        # pelo bloco de failure_markers abaixo — não precisa de skip preventivo.
         params = {"numero": numero, "mensagem": mensagem}
         tool = "enviar_mensagem"
     elif ticket_id:

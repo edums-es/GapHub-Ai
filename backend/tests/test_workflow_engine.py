@@ -304,13 +304,19 @@ async def test_execute_workflow_send_message_uses_push_api():
 
 
 @pytest.mark.asyncio
-async def test_send_message_skips_group_jids():
-    """JIDs de grupo do WhatsApp (18+ dígitos) não podem receber Push API — precisam ser pulados."""
+async def test_send_message_passes_long_numbers_through():
+    """
+    Números de 18 dígitos (ex.: tickets do Flemy/ClickMassa que aparecem como
+    'group') DEVEM passar pelo send_message — a instância do cliente aceita
+    esses IDs como alvos válidos da Push API. O skip antigo 'group_jid' quebrou
+    toda a integração e foi removido. Se a Push API recusar, o erro vira
+    status=error via failure_markers (coberto por test_send_message_propagates_clickmassa_403).
+    """
     from workflow_engine import execute_workflow
 
-    tool_mock = AsyncMock(return_value={"ok": True})
+    tool_mock = AsyncMock(return_value={"ok": True, "output": "enviado"})
     wf = {
-        "workflow_id": "group",
+        "workflow_id": "long_num",
         "nodes": [
             {"id": "start", "type": "trigger", "next": "send", "config": {}},
             {"id": "send", "type": "send_message", "next": "end", "config": {"message": "olá"}},
@@ -320,7 +326,7 @@ async def test_send_message_skips_group_jids():
     context = {
         "input": "x",
         "ticket_id": "1",
-        "contact_number": "120363426150235401",  # JID de grupo típico
+        "contact_number": "120363426150235401",  # 18 dígitos — Flemy/ClickMassa trata como alvo válido
         "variables": {},
         "steps": [],
     }
@@ -328,10 +334,12 @@ async def test_send_message_skips_group_jids():
 
     result = await execute_workflow(wf, context, deps)
 
-    tool_mock.assert_not_called()
+    tool_mock.assert_called_once()
+    args = tool_mock.call_args[0]
+    assert args[1] == "enviar_mensagem"
+    assert args[2]["numero"] == "120363426150235401"
     send_step = next(s for s in result["steps"] if s.get("node_id") == "send")
-    assert send_step["result"]["status"] == "skipped"
-    assert send_step["result"]["reason"] == "group_jid"
+    assert send_step["result"]["status"] == "ok"
 
 
 @pytest.mark.asyncio
