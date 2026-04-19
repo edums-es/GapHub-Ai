@@ -15,7 +15,6 @@ import Settings from "@/pages/Settings";
 import AdminPanel from "@/pages/AdminPanel";
 import Schedules from "@/pages/Schedules";
 import AgentChat from "@/pages/AgentChat";
-import Workflows from "@/pages/Workflows";
 import WorkflowBuilder from "@/pages/WorkflowBuilder";
 
 const API = process.env.REACT_APP_BACKEND_URL + "/api";
@@ -108,7 +107,8 @@ function AppRouter() {
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
       <Route path="/schedules" element={<ProtectedRoute><Schedules /></ProtectedRoute>} />
       <Route path="/chat" element={<ProtectedRoute><AgentChat /></ProtectedRoute>} />
-      <Route path="/workflows" element={<ProtectedRoute><Workflows /></ProtectedRoute>} />
+      {/* /workflows vira detalhe do agente — redirecionamos para /agents */}
+      <Route path="/workflows" element={<Navigate to="/agents" replace />} />
       <Route path="/workflows/:workflowId" element={<ProtectedRoute><WorkflowBuilder /></ProtectedRoute>} />
       <Route path="/admin" element={<AdminRoute><AdminPanel /></AdminRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />
