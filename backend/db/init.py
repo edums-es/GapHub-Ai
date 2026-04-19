@@ -120,6 +120,13 @@ async def create_indexes(db):
     )
     await db.schedules.create_index("active", name="schedules_active")
 
+    # ── workflows ──────────────────────────────────────────────────────────
+    await db.workflows.create_index("workflow_id", unique=True, name="workflows_id_unique")
+    await db.workflows.create_index(
+        [("workspace_id", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)],
+        name="workflows_workspace_created"
+    )
+
     # ── user_sessions / login_attempts (auth) ──────────────────────────────
     await db.user_sessions.create_index("session_token", name="user_sessions_token")
     await db.login_attempts.create_index("identifier", name="login_attempts_identifier")

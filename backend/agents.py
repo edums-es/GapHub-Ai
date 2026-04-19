@@ -587,6 +587,7 @@ class AgentUpdate(BaseModel):
     nodes: Optional[List[dict]] = None
     edges: Optional[List[dict]] = None
     enabled_skill_packs: Optional[List[str]] = None
+    workflow_id: Optional[str] = None
 
 
 class SkillPacksUpdate(BaseModel):
@@ -2168,18 +2169,74 @@ async def webhook_trigger(
     # Executa agente em background (fire-and-forget)
     async def run_background():
         try:
-            # webhook_mode=True: remove ferramentas de busca de histórico e força
-            # tool_choice=required. original_input_for_history salva apenas a mensagem
-            # limpa do lead no histórico, não o envelope de instrução do webhook.
-            # allowed_ticket_id/allowed_numero ativam o TICKET SCOPE LOCK: se o LLM
-            # tentar enviar para outro ticket/número, a chamada é rejeitada.
-            output, steps = await execute_agent(
-                agent, user_input, workspace_creds, db=db, session_id=session_id,
-                max_iterations=3, webhook_mode=True,
-                original_input_for_history=original_input,
-                allowed_ticket_id=str(ticket_id_for_reply or ""),
-                allowed_numero=str(contact_number_for_reply or ""),
-            )
+            # ── Modo WORKFLOW: se o agente tem workflow_id configurado, usa a
+            # engine determinística (workflow_engine) em vez da LLM free-form.
+            # O workflow decide quando chamar cada tool — muito menos margem pra
+            # o LLM "alucinar" ou responder sem executar a ação prometida.
+            workflow_id = agent.get("workflow_id")
+            used_workflow = False
+            if workflow_id:
+                try:
+                    wf_doc = await db.workflows.find_one({
+                        "workflow_id": workflow_id,
+                        "workspace_id": workspace_id,
+                    })
+                except Exception as wf_err:
+                    logger.warning(f"[Webhook {agent_id}] erro buscando workflow {workflow_id}: {wf_err}")
+                    wf_doc = None
+
+                if wf_doc:
+                    from workflow_engine import execute_workflow as _execute_wf
+                    wf_context = {
+                        "input": original_input,
+                        "ticket_id": str(ticket_id_for_reply or ""),
+                        "contact_id": metadata.get("contact_id", ""),
+                        "contact_number": contact_number_for_reply or "",
+                        "contact_name": metadata.get("contact_name", ""),
+                        "workspace_id": workspace_id,
+                        "variables": {},
+                        "steps": [],
+                        "output": "",
+                        "errors": [],
+                    }
+                    deps = {
+                        "execute_tool": execute_tool,
+                        "workspace_creds": workspace_creds,
+                        "default_model": agent.get("model") or "openai/gpt-4o-mini",
+                        "llm_kwargs": {},
+                    }
+                    wf_result = await _execute_wf(wf_doc, wf_context, deps)
+                    output = wf_result.get("output", "")
+                    steps = [
+                        {
+                            "tool": s.get("node_type"),
+                            "node_id": s.get("node_id"),
+                            "node_label": s.get("node_label"),
+                            "result": s.get("result"),
+                            "iteration": idx,
+                        }
+                        for idx, s in enumerate(wf_result.get("steps", []))
+                    ]
+                    used_workflow = True
+                    logger.info(
+                        f"[Webhook {agent_id}] workflow {workflow_id} rodou em "
+                        f"{wf_result.get('duration_ms')}ms com {len(steps)} steps"
+                    )
+
+            # ── Modo LEGADO (LLM free-form) — usado quando não há workflow_id.
+            if not used_workflow:
+                # webhook_mode=True: remove ferramentas de busca de histórico e força
+                # tool_choice=required. original_input_for_history salva apenas a mensagem
+                # limpa do lead no histórico, não o envelope de instrução do webhook.
+                # allowed_ticket_id/allowed_numero ativam o TICKET SCOPE LOCK: se o LLM
+                # tentar enviar para outro ticket/número, a chamada é rejeitada.
+                output, steps = await execute_agent(
+                    agent, user_input, workspace_creds, db=db, session_id=session_id,
+                    max_iterations=3, webhook_mode=True,
+                    original_input_for_history=original_input,
+                    allowed_ticket_id=str(ticket_id_for_reply or ""),
+                    allowed_numero=str(contact_number_for_reply or ""),
+                )
 
             # Fallback automático: se o agente gerou texto mas não chamou enviar_mensagem,
             # envia a resposta programaticamente via Push API (enviar_mensagem) — NUNCA

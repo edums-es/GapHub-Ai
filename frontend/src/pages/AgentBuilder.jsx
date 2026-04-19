@@ -514,6 +514,9 @@ export default function AgentBuilder() {
   const [savingMcpCreds, setSavingMcpCreds] = useState(false);
   // Skill packs habilitados no agente (nós condicionados)
   const [enabledSkillPacks, setEnabledSkillPacks] = useState([]);
+  // Workflow vinculado ao agente (engine determinística)
+  const [workflowId, setWorkflowId] = useState("");
+  const [availableWorkflows, setAvailableWorkflows] = useState([]);
 
   // Bug Fix #5 — Zoom/Pan: controles de zoom e pan no canvas via CSS transform
   const [zoom, setZoom] = useState(1.0);
@@ -566,8 +569,13 @@ export default function AgentBuilder() {
           setEdges(a.edges || []);
           setLlmConfig(a.llm_config || {});
           setEnabledSkillPacks(a.enabled_skill_packs || []);
+          setWorkflowId(a.workflow_id || "");
         })
         .finally(() => setLoading(false));
+      // Lista workflows disponíveis para vincular
+      axios.get(`${API}/workflows`, { withCredentials: true })
+        .then(r => setAvailableWorkflows(r.data?.workflows || []))
+        .catch(() => setAvailableWorkflows([]));
       // Carrega info de webhook (sem exibir o secret)
       axios.get(`${API}/agents/${agentId}/webhook-info`, { withCredentials: true })
         .then(r => setWebhookInfo(r.data))
@@ -669,7 +677,7 @@ export default function AgentBuilder() {
     setValidationErrors([]);
     setSaving(true);
     try {
-      const payload = { name: agentName, nodes, edges, llm_config: llmConfig, enabled_skill_packs: enabledSkillPacks };
+      const payload = { name: agentName, nodes, edges, llm_config: llmConfig, enabled_skill_packs: enabledSkillPacks, workflow_id: workflowId || "" };
       if (isNew) {
         const { data } = await axios.post(`${API}/agents`, payload, { withCredentials: true });
         setAgent(data);
@@ -706,6 +714,56 @@ export default function AgentBuilder() {
             {validationErrors.map((err, i) => (
               <div key={i} style={{ fontSize: 12, color: "#F87171" }}>• {err}</div>
             ))}
+          </div>
+        )}
+        {/* Workflow link banner */}
+        {!isNew && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10, marginBottom: 8,
+            padding: "8px 12px",
+            background: workflowId ? "rgba(249,115,22,0.08)" : "#121212",
+            border: `1px solid ${workflowId ? "rgba(249,115,22,0.3)" : "#27272A"}`,
+            borderRadius: 8,
+          }}>
+            <div style={{ fontSize: 11, color: "#737373", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+              Workflow
+            </div>
+            <select
+              value={workflowId}
+              onChange={(e) => setWorkflowId(e.target.value)}
+              style={{
+                flex: 1, padding: "6px 10px", background: "#1A1A1A",
+                border: "1px solid #27272A", borderRadius: 6, color: "white",
+                fontSize: 13, outline: "none", cursor: "pointer",
+              }}
+            >
+              <option value="">— Nenhum (usa modo LLM tradicional) —</option>
+              {availableWorkflows.map(w => (
+                <option key={w.workflow_id} value={w.workflow_id}>{w.name}</option>
+              ))}
+            </select>
+            <button
+              onClick={() => navigate("/workflows")}
+              style={{
+                padding: "6px 10px", background: "transparent",
+                border: "1px solid #27272A", borderRadius: 6,
+                color: "#A3A3A3", fontSize: 12, cursor: "pointer",
+              }}
+            >
+              Gerenciar
+            </button>
+            {workflowId && (
+              <button
+                onClick={() => navigate(`/workflows/${workflowId}`)}
+                style={{
+                  padding: "6px 10px", background: "rgba(249,115,22,0.12)",
+                  border: "1px solid rgba(249,115,22,0.3)", borderRadius: 6,
+                  color: "#F97316", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                }}
+              >
+                Editar
+              </button>
+            )}
           </div>
         )}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>

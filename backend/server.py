@@ -16,6 +16,7 @@ from agents import agents_router
 from marketplace import marketplace_router
 from admin import admin_router
 from scheduler import scheduler_router, init_scheduler, stop_scheduler
+from workflows_api import workflows_router, workflow_templates_router
 from db.init import create_indexes as _create_indexes_full, seed_marketplace_templates
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -67,6 +68,8 @@ app.include_router(agents_router)
 app.include_router(marketplace_router)
 app.include_router(admin_router)
 app.include_router(scheduler_router)
+app.include_router(workflows_router)
+app.include_router(workflow_templates_router)
 
 
 @app.get("/api/health")
