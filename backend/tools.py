@@ -182,38 +182,55 @@ async def execute_clickmassa_tool(tool_name: str, params: dict, credentials: dic
             elif tool_name == "adicionar_etiquetas":
                 return await c.patch(f"{base_url}/v1/contacts/{params['id']}", json={"tags": params["tags"]}, headers=headers)
             elif tool_name == "enviar_mensagem":
-                # Envia via API interna do ticket com fromMe=true para marcar como mensagem da empresa.
-                # A Push API (/v1/api/external) não funciona neste CRM.
+                # Envia via Push API (/v1/api/external/{canal_id}) — único endpoint que
+                # registra a mensagem como EMPRESA no CRM (aparece à direita com "Envio externo").
+                # fromMe=true em POST /messages/{id} NÃO funciona: o ClickMassa ignora o flag
+                # e mantém a mensagem como se fosse do lead.
                 numero = params.get("numero")
                 if not numero:
                     return {"error": "Número é obrigatório."}
                 mensagem = params.get("mensagem")
                 if not mensagem:
                     return {"error": "Mensagem é obrigatória."}
-                # Busca ticket aberto para o número
-                search = await c.get(f"{base_url}/tickets?searchParam={numero}&showAll=true", headers=headers)
-                tickets = search.json().get("tickets", [])
-                ticket = next((t for t in tickets if t["contact"]["number"] == numero and t["status"] in ["open", "pending"]), None)
-                if not ticket:
-                    return {"error": f"Nenhum ticket aberto para {numero}"}
-                # Envia com fromMe=true para marcar como mensagem da empresa (aparece à direita no CRM)
-                return await c.post(f"{base_url}/messages/{ticket['id']}", json={"body": mensagem, "fromMe": True}, headers=headers)
+                cid = params.get("canal_id") or canal_id
+                if not cid:
+                    return {"error": "canal_id não configurado nas credenciais. Defina canal_id para usar a Push API."}
+                import time as _time
+                external_key = params.get("external_key") or f"gaphub-{int(_time.time() * 1000)}"
+                return await c.post(
+                    f"{base_url}/v1/api/external/{cid}",
+                    json={"number": numero, "body": mensagem, "externalKey": external_key},
+                    headers=headers,
+                )
             elif tool_name == "enviar_mensagem_direta":
+                # Também usa Push API — a mensagem é roteada automaticamente pelo ClickMassa
+                # para o ticket aberto do número correspondente, e fica registrada como empresa.
+                mensagem = params.get("mensagem")
+                if not mensagem:
+                    return {"error": "Mensagem é obrigatória."}
+                numero = params.get("numero")
                 ticket_id = params.get("ticket_id")
-                if not ticket_id:
-                    # Fallback to search by number if ticket_id is omitted
-                    numero = params.get("numero")
-                    if not numero:
-                        return {"error": "É necessário fornecer o ticket_id ou o numero."}
-                    search = await c.get(f"{base_url}/tickets?searchParam={numero}&showAll=true", headers=headers)
-                    tickets = search.json().get("tickets", [])
-                    ticket = next((t for t in tickets if t["contact"]["number"] == numero and t["status"] in ["open", "pending"]), None)
-                    if not ticket:
-                        return {"error": f"Nenhum ticket aberto para o número {numero}"}
-                    ticket_id = ticket['id']
-                
-                # Envia com fromMe=True para marcar como mensagem da empresa (aparece à direita no CRM)
-                return await c.post(f"{base_url}/messages/{ticket_id}", json={"body": params["mensagem"], "fromMe": True}, headers=headers)
+                # Se vier ticket_id mas não vier numero, busca o número do ticket
+                if ticket_id and not numero:
+                    try:
+                        tk = await c.get(f"{base_url}/tickets/{ticket_id}", headers=headers)
+                        td = tk.json()
+                        numero = (td.get("contact") or {}).get("number", "")
+                    except Exception:
+                        numero = ""
+                # Se vier só numero sem ticket_id, ok — Push API resolve
+                if not numero:
+                    return {"error": "Não foi possível determinar o número de destino. Forneça numero ou ticket_id válido."}
+                cid = params.get("canal_id") or canal_id
+                if not cid:
+                    return {"error": "canal_id não configurado. Use enviar_mensagem ou configure canal_id nas credenciais."}
+                import time as _time
+                external_key = params.get("external_key") or f"gaphub-{int(_time.time() * 1000)}"
+                return await c.post(
+                    f"{base_url}/v1/api/external/{cid}",
+                    json={"number": numero, "body": mensagem, "externalKey": external_key},
+                    headers=headers,
+                )
             elif tool_name == "enviar_nota_interna":
                 ticket_id = params.get("ticket_id")
                 if not ticket_id:
