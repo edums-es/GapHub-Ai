@@ -382,10 +382,6 @@ async def _exec_send_message(node: Dict[str, Any], context: Dict[str, Any], deps
         return {"status": "error", "error": "execute_tool não provida"}
 
     if numero:
-        # O skip para JIDs de grupo foi removido: a instância ClickMassa do Eduardo
-        # (Flemy) trata tickets com números de 18 dígitos como alvos válidos da
-        # Push API. Se o endpoint rejeitar, o erro aparece em `result` e é propagado
-        # pelo bloco de failure_markers abaixo — não precisa de skip preventivo.
         params = {"numero": numero, "mensagem": mensagem}
         tool = "enviar_mensagem"
     elif ticket_id:
@@ -399,6 +395,33 @@ async def _exec_send_message(node: Dict[str, Any], context: Dict[str, Any], deps
     except Exception as e:
         logger.error(f"[workflow send_message] falhou: {e}", exc_info=True)
         return {"status": "error", "error": str(e)}
+
+    # Fallback: se Push API falhou por canal_id ausente, tenta POST /messages/{ticket_id}
+    # (endpoint legado — garante entrega mesmo sem canal_id configurado).
+    canal_id_missing = isinstance(result, dict) and (
+        "canal_id" in result.get("error", "")
+        or "não configurado" in result.get("error", "")
+    )
+    if canal_id_missing and ticket_id:
+        logger.warning(
+            f"[workflow send_message] Push API sem canal_id, "
+            f"tentando /messages/{ticket_id} como fallback"
+        )
+        api_url = (creds.get("apiUrl") or creds.get("base_url", "")).rstrip("/")
+        token = creds.get("userToken") or creds.get("token", "")
+        try:
+            import httpx as _httpx
+            async with _httpx.AsyncClient(timeout=15) as _c:
+                _resp = await _c.post(
+                    f"{api_url}/messages/{ticket_id}",
+                    json={"body": mensagem},
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                )
+                result = _resp.json() if _resp.content else {"http_status": _resp.status_code}
+            logger.info(f"[workflow send_message] fallback /messages result: {str(result)[:200]}")
+        except Exception as _fb_err:
+            logger.error(f"[workflow send_message] fallback /messages falhou: {_fb_err}")
+            return {"status": "error", "error": f"Push API e fallback falharam. Push: canal_id ausente. Fallback: {_fb_err}"}
 
     # Detecta falha da ClickMassa: a resposta vem no formato
     # {"error": "..."} ou {"output": "ClickMassa POST ... → 4xx: ..."}.

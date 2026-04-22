@@ -2524,51 +2524,93 @@ async def webhook_trigger(
                 return False
 
             sent_via_tool = any(_step_sent_message(s) for s in steps)
-            # Se rodou em workflow E o send_message do workflow falhou/skippou, ainda queremos
-            # evitar fallback duplicado — o workflow é AUTORITATIVO. Caso contrário, o Eduardo
-            # receberia a mensagem duas vezes sempre que o token estiver correto.
+
+            # workflow_attempted_send só é True quando o send_message do workflow
+            # TEVE SUCESSO (status ok/skipped). Se falhou (canal_id ausente, 401, etc.),
+            # NÃO bloqueamos o fallback — queremos tentar entregar a mensagem de qualquer forma.
             workflow_attempted_send = used_workflow and any(
-                (s.get("tool") == "send_message") for s in steps
+                s.get("tool") == "send_message"
+                and isinstance(s.get("result"), dict)
+                and s["result"].get("status") in ("ok", "skipped")
+                for s in steps
             )
+
             if not sent_via_tool and not workflow_attempted_send and workspace_creds.get("clickmassa"):
                 creds_cm = workspace_creds["clickmassa"]
                 send_result = None
                 try:
                     if contact_number_for_reply:
-                        logger.info(f"[Webhook {agent_id}] fallback: enviando via Push API (numero={contact_number_for_reply})")
+                        # Tentativa 1: Push API (garante que aparece como empresa no CRM)
+                        logger.info(f"[Webhook {agent_id}] fallback T1: Push API numero={contact_number_for_reply}")
                         send_result = await execute_tool("clickmassa", "enviar_mensagem", {
                             "numero": contact_number_for_reply,
                             "mensagem": output,
                         }, creds_cm)
-                    else:
-                        # Sem número não dá pra usar Push API. Não fazemos fallback para
-                        # enviar_mensagem_direta porque a mensagem apareceria como do lead.
-                        logger.warning(
-                            f"[Webhook {agent_id}] fallback NÃO executado: sem contact_number. "
-                            f"A mensagem do agente foi gerada mas não pôde ser enviada via Push API. "
-                            f"Verifique se o payload do CRM traz ticket.contact.number."
+
+                        # Tentativa 2: Se Push API falhou por canal_id, tenta direto pelo ticket
+                        push_failed = isinstance(send_result, dict) and (
+                            "canal_id" in send_result.get("error", "")
+                            or "não configurado" in send_result.get("error", "")
                         )
+                        if push_failed and ticket_id_for_reply:
+                            logger.warning(
+                                f"[Webhook {agent_id}] fallback T1 falhou (canal_id ausente), "
+                                f"tentando T2: /messages/{ticket_id_for_reply}"
+                            )
+                            import httpx as _httpx
+                            _api = (creds_cm.get("apiUrl") or creds_cm.get("base_url", "")).rstrip("/")
+                            _token = creds_cm.get("userToken") or creds_cm.get("token", "")
+                            try:
+                                async with _httpx.AsyncClient(timeout=15) as _c:
+                                    _resp = await _c.post(
+                                        f"{_api}/messages/{ticket_id_for_reply}",
+                                        json={"body": output},
+                                        headers={"Authorization": f"Bearer {_token}", "Content-Type": "application/json"},
+                                    )
+                                    send_result = _resp.json() if _resp.content else {"status": _resp.status_code}
+                                logger.info(f"[Webhook {agent_id}] fallback T2 result: {str(send_result)[:200]}")
+                            except Exception as _t2_err:
+                                logger.error(f"[Webhook {agent_id}] fallback T2 falhou: {_t2_err}")
+
+                    elif ticket_id_for_reply:
+                        # Sem numero mas com ticket_id: tenta Push API via ticket
+                        logger.info(f"[Webhook {agent_id}] fallback: Push API ticket_id={ticket_id_for_reply}")
+                        send_result = await execute_tool("clickmassa", "enviar_mensagem_direta", {
+                            "ticket_id": str(ticket_id_for_reply),
+                            "mensagem": output,
+                        }, creds_cm)
+                        # Se Push API falhou por canal_id, usa /messages direto
+                        if isinstance(send_result, dict) and "canal_id" in send_result.get("error", ""):
+                            logger.warning(f"[Webhook {agent_id}] fallback T2: /messages/{ticket_id_for_reply}")
+                            import httpx as _httpx
+                            _api = (creds_cm.get("apiUrl") or creds_cm.get("base_url", "")).rstrip("/")
+                            _token = creds_cm.get("userToken") or creds_cm.get("token", "")
+                            try:
+                                async with _httpx.AsyncClient(timeout=15) as _c:
+                                    _resp = await _c.post(
+                                        f"{_api}/messages/{ticket_id_for_reply}",
+                                        json={"body": output},
+                                        headers={"Authorization": f"Bearer {_token}", "Content-Type": "application/json"},
+                                    )
+                                    send_result = _resp.json() if _resp.content else {"status": _resp.status_code}
+                            except Exception as _t2_err:
+                                logger.error(f"[Webhook {agent_id}] fallback T2 (ticket) falhou: {_t2_err}")
+                    else:
+                        logger.warning(f"[Webhook {agent_id}] fallback NÃO executado: sem contact_number nem ticket_id")
 
                     if send_result:
                         logger.info(f"[Webhook {agent_id}] fallback result: {json.dumps(send_result, ensure_ascii=False, default=str)[:200]}")
                         steps.append({
                             "tool": "auto_send_fallback",
-                            "params": {"numero": contact_number_for_reply},
+                            "params": {"numero": contact_number_for_reply, "ticket_id": ticket_id_for_reply},
                             "result": send_result,
                             "iteration": 0,
                         })
                 except Exception as send_err:
                     logger.error(f"[Webhook {agent_id}] fallback FALHOU: {send_err}", exc_info=True)
             elif not sent_via_tool:
-                # Diferencia os dois motivos possíveis do fallback não disparar:
-                # 1) O workflow JÁ TENTOU enviar (e falhou/pulou) — não redobra envio.
-                # 2) Não há credenciais ClickMassa configuradas — envio realmente impossível.
-                if workflow_attempted_send:
-                    logger.warning(
-                        f"[Webhook {agent_id}] fallback NÃO executado: o workflow já tentou enviar (send_message). "
-                        f"Se houve erro 401/403 do ClickMassa, teste o userToken em Agent Builder → "
-                        f"MCP Credentials → 'Testar conexão'. O fallback não redobra o envio."
-                    )
+                if workspace_creds.get("clickmassa"):
+                    logger.info(f"[Webhook {agent_id}] fallback NÃO executado: workflow send_message OK ou mensagem já enviada")
                 else:
                     logger.warning(
                         f"[Webhook {agent_id}] fallback ignorado: credenciais clickmassa não encontradas. "
