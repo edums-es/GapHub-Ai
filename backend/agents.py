@@ -836,6 +836,7 @@ class AgentMCPCredential(BaseModel):
     apiUrl: str = ""
     userToken: str = ""
     wabaId: Optional[str] = ""
+    canal_id: Optional[str] = ""   # ID do canal WhatsApp para a Push API
 
 
 @agents_router.get("/agents/{agent_id}/mcp-credentials")
@@ -868,6 +869,7 @@ async def get_agent_mcp_credentials(request: Request, agent_id: str):
         "apiUrl": doc.get("apiUrl", ""),  # URL não é sensível
         "userToken": _mask(doc["userToken"]) if doc.get("userToken") else "",
         "wabaId": doc.get("wabaId", ""),
+        "canal_id": doc.get("canal_id", ""),  # não sensível, retorna cru
         "updated_at": doc.get("updated_at"),
     }
 
@@ -893,6 +895,7 @@ async def upsert_agent_mcp_credentials(request: Request, agent_id: str, body: Ag
         "apiUrl": body.apiUrl,  # URL não é sensível
         "userToken": encrypt(body.userToken) if body.userToken else "",
         "wabaId": body.wabaId or "",
+        "canal_id": body.canal_id or "",  # ID do canal WhatsApp (Push API)
         "updated_at": now,
     }
 
@@ -1059,6 +1062,100 @@ async def test_agent_mcp_credentials(request: Request, agent_id: str):
     }
 
 
+@agents_router.get("/agents/{agent_id}/whatsapp-channels")
+async def list_whatsapp_channels(request: Request, agent_id: str):
+    """
+    Lista canais WhatsApp disponíveis na instância ClickMassa do agente.
+    Usado pela UI para o usuário escolher qual canal_id usar nas credenciais.
+
+    Retorna: {"ok": bool, "channels": [{"id": "...", "name": "...", "number": "...",
+              "status": "...", "connected": bool}], "error": "..."}
+    """
+    import httpx
+    user = await get_current_user(request)
+    db = request.app.state.db
+    agent = await db.agents.find_one(
+        {"agent_id": agent_id, "workspace_id": user["workspace_id"]}, {"_id": 0}
+    )
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+
+    # Reusa a mesma lógica de resolução de credenciais do test_agent_mcp_credentials
+    creds = None
+    try:
+        agent_creds = await _get_agent_mcp_credentials(db, agent_id)
+        if agent_creds and (agent_creds.get("userToken") or agent_creds.get("apiUrl")):
+            creds = agent_creds
+    except Exception:
+        pass
+    if not creds:
+        try:
+            ws_cred = await db.credentials.find_one(
+                {"workspace_id": agent.get("workspace_id", ""), "mcp_id": "clickmassa"}
+            )
+            if ws_cred:
+                decrypted = {}
+                for k, v in (ws_cred.get("data", {}) or {}).items():
+                    try:
+                        decrypted[k] = decrypt(str(v))
+                    except Exception:
+                        decrypted[k] = v
+                creds = decrypted
+        except Exception:
+            pass
+
+    if not creds:
+        return {"ok": False, "channels": [], "error": "Nenhuma credencial ClickMassa configurada."}
+
+    api_url = (creds.get("apiUrl") or creds.get("base_url") or "").rstrip("/")
+    token = creds.get("userToken") or creds.get("token") or ""
+    if not api_url or not token:
+        return {"ok": False, "channels": [], "error": "apiUrl ou userToken vazios."}
+
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+            resp = await c.get(f"{api_url}/whatsapp/list", headers=headers)
+    except Exception as e:
+        return {"ok": False, "channels": [], "error": f"Erro de conexão: {e}"}
+
+    if resp.status_code in (401, 403):
+        return {"ok": False, "channels": [], "error": f"{resp.status_code} — token rejeitado pela ClickMassa."}
+    if resp.status_code >= 400:
+        return {"ok": False, "channels": [], "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+
+    try:
+        data = resp.json()
+    except Exception:
+        return {"ok": False, "channels": [], "error": "Resposta não-JSON da ClickMassa."}
+
+    # A resposta pode vir como lista direta ou envelopada em {"whatsapps": [...]} ou {"data": [...]}
+    raw_list = data if isinstance(data, list) else (
+        data.get("whatsapps") or data.get("data") or data.get("channels") or []
+    )
+    if not isinstance(raw_list, list):
+        return {"ok": False, "channels": [], "error": "Formato de resposta inesperado.", "raw": str(data)[:200]}
+
+    channels = []
+    for ch in raw_list:
+        if not isinstance(ch, dict):
+            continue
+        ch_id = ch.get("id") or ch.get("channelId") or ch.get("canal_id")
+        if ch_id is None:
+            continue
+        status = str(ch.get("status") or ch.get("state") or "").upper()
+        channels.append({
+            "id": str(ch_id),
+            "name": ch.get("name") or ch.get("displayName") or f"Canal {ch_id}",
+            "number": ch.get("number") or ch.get("phoneNumber") or "",
+            "status": status or "UNKNOWN",
+            "connected": status in ("CONNECTED", "OPEN", "ACTIVE", "ONLINE"),
+            "is_default": bool(ch.get("isDefault") or ch.get("default")),
+        })
+
+    return {"ok": True, "channels": channels, "total": len(channels)}
+
+
 async def _get_agent_mcp_credentials(db, agent_id: str) -> Optional[dict]:
     """
     Helper interno: retorna credenciais MCP decriptadas para um agente específico.
@@ -1071,6 +1168,7 @@ async def _get_agent_mcp_credentials(db, agent_id: str) -> Optional[dict]:
         "apiUrl": doc.get("apiUrl", ""),
         "userToken": decrypt(doc["userToken"]) if doc.get("userToken") else "",
         "wabaId": doc.get("wabaId", ""),
+        "canal_id": doc.get("canal_id", ""),  # ID do canal para Push API
         # Campos legados para compatibilidade com tools.py
         "base_url": doc.get("apiUrl", ""),
         "token": decrypt(doc["userToken"]) if doc.get("userToken") else "",
@@ -2386,6 +2484,10 @@ async def webhook_trigger(
 
             # ── Modo LEGADO (LLM free-form) — usado quando não há workflow_id.
             if not used_workflow:
+                logger.info(
+                    f"[Webhook {agent_id}] rodando em MODO LLM FREE-FORM (sem workflow_id amarrado). "
+                    f"Para mudar, vincule um workflow em Agent Builder → 'Ativar modo Workflow'."
+                )
                 # webhook_mode=True: remove ferramentas de busca de histórico e força
                 # tool_choice=required. original_input_for_history salva apenas a mensagem
                 # limpa do lead no histórico, não o envelope de instrução do webhook.

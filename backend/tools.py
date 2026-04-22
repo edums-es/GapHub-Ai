@@ -56,6 +56,9 @@ class _TTLCache:
 # Cache de tokens de sessão por workspace — TTL de 30 minutos
 _session_cache: _TTLCache = _TTLCache(ttl_seconds=1800)
 
+# Cache de canal_id auto-descoberto por workspace. TTL longo: canais raramente mudam.
+_canal_id_cache: _TTLCache = _TTLCache(ttl_seconds=3600)  # 1 hora
+
 
 async def get_clickmassa_token(credentials: dict) -> str:
     workspace_id = credentials.get("workspace_id", "default")
@@ -90,6 +93,50 @@ async def get_clickmassa_token(credentials: dict) -> str:
         "Credenciais ClickMassa inválidas ou não configuradas. "
         "Configure email+senha OU token direto nas Configurações."
     )
+
+
+async def _autodiscover_canal_id(base_url: str, token: str, workspace_id: str) -> "str | None":
+    """
+    Tenta descobrir o canal_id ativo chamando /whatsapp/list e pegando o primeiro
+    canal CONECTADO. Cacheado por workspace (TTL 1h). Retorna None se não encontrar.
+    Só cacheia resultados válidos — erros não são cacheados.
+    """
+    cached = _canal_id_cache[workspace_id] if workspace_id in _canal_id_cache else None
+    if cached:
+        return cached
+    try:
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(timeout=8) as c:
+            resp = await c.get(f"{base_url}/whatsapp/list", headers=headers)
+        if resp.status_code >= 400:
+            return None
+        data = resp.json()
+        raw_list = data if isinstance(data, list) else (
+            data.get("whatsapps") or data.get("data") or data.get("channels") or []
+        )
+        if not isinstance(raw_list, list):
+            return None
+        # Prioriza canais com status CONNECTED; senão pega o primeiro com id válido
+        connected = [
+            ch for ch in raw_list
+            if isinstance(ch, dict)
+            and str(ch.get("status") or ch.get("state") or "").upper()
+            in ("CONNECTED", "OPEN", "ACTIVE", "ONLINE")
+            and ch.get("id")
+        ]
+        chosen = connected[0] if connected else next(
+            (ch for ch in raw_list if isinstance(ch, dict) and ch.get("id")), None
+        )
+        if not chosen:
+            return None
+        cid = str(chosen["id"])
+        if workspace_id:
+            _canal_id_cache[workspace_id] = cid
+        logger.info(f"[autodiscover_canal_id] workspace={workspace_id} descobriu canal_id={cid}")
+        return cid
+    except Exception as e:
+        logger.warning(f"[autodiscover_canal_id] falhou: {e}")
+        return None
 
 
 def _format_messages_with_direction(messages_raw: list) -> list:
@@ -194,7 +241,13 @@ async def execute_clickmassa_tool(tool_name: str, params: dict, credentials: dic
                     return {"error": "Mensagem é obrigatória."}
                 cid = params.get("canal_id") or canal_id
                 if not cid:
-                    return {"error": "canal_id não configurado nas credenciais. Defina canal_id para usar a Push API."}
+                    cid = await _autodiscover_canal_id(base_url, token, workspace_id)
+                if not cid:
+                    return {"error": (
+                        "canal_id não configurado nas credenciais e não foi possível descobrir "
+                        "automaticamente via /whatsapp/list. Configure manualmente em Agent Builder "
+                        "→ MCP Credentials → canal_id."
+                    )}
                 import time as _time
                 external_key = params.get("external_key") or f"gaphub-{int(_time.time() * 1000)}"
                 return await c.post(
@@ -223,7 +276,12 @@ async def execute_clickmassa_tool(tool_name: str, params: dict, credentials: dic
                     return {"error": "Não foi possível determinar o número de destino. Forneça numero ou ticket_id válido."}
                 cid = params.get("canal_id") or canal_id
                 if not cid:
-                    return {"error": "canal_id não configurado. Use enviar_mensagem ou configure canal_id nas credenciais."}
+                    cid = await _autodiscover_canal_id(base_url, token, workspace_id)
+                if not cid:
+                    return {"error": (
+                        "canal_id não configurado. Use enviar_mensagem ou configure canal_id nas credenciais "
+                        "(Agent Builder → MCP Credentials → canal_id)."
+                    )}
                 import time as _time
                 external_key = params.get("external_key") or f"gaphub-{int(_time.time() * 1000)}"
                 return await c.post(

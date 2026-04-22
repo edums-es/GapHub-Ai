@@ -510,7 +510,9 @@ export default function AgentBuilder() {
   // Per-agent MCP credentials state
   const [mcpCredsInfo, setMcpCredsInfo] = useState(null); // {configured, apiUrl, userToken, wabaId}
   const [showMcpCredsForm, setShowMcpCredsForm] = useState(false);
-  const [mcpCredsForm, setMcpCredsForm] = useState({ apiUrl: "", userToken: "", wabaId: "" });
+  const [mcpCredsForm, setMcpCredsForm] = useState({ apiUrl: "", userToken: "", wabaId: "", canal_id: "" });
+  const [whatsappChannels, setWhatsappChannels] = useState(null); // null | [{id, name, number, status, connected}]
+  const [loadingChannels, setLoadingChannels] = useState(false);
   const [savingMcpCreds, setSavingMcpCreds] = useState(false);
   // Diagnóstico ClickMassa: testa se o userToken é aceito sem enviar mensagem real.
   const [testingConn, setTestingConn] = useState(false);
@@ -593,7 +595,7 @@ export default function AgentBuilder() {
         .catch(() => {});
       // Carrega credenciais MCP por agente (campos sensíveis mascarados)
       axios.get(`${API}/agents/${agentId}/mcp-credentials`, { withCredentials: true })
-        .then(r => { setMcpCredsInfo(r.data); if (r.data.configured) setMcpCredsForm({ apiUrl: r.data.apiUrl || "", userToken: "", wabaId: r.data.wabaId || "" }); })
+        .then(r => { setMcpCredsInfo(r.data); if (r.data.configured) setMcpCredsForm({ apiUrl: r.data.apiUrl || "", userToken: "", wabaId: r.data.wabaId || "", canal_id: r.data.canal_id || "" }); })
         .catch(() => {});
     } else {
       const defaultNodes = [
@@ -704,6 +706,34 @@ export default function AgentBuilder() {
     }
   };
 
+  // ---- Helper: lista canais WhatsApp da instância ClickMassa ----
+  const fetchWhatsappChannels = async () => {
+    if (!agentId || loadingChannels) return;
+    setLoadingChannels(true);
+    setWhatsappChannels(null);
+    try {
+      const { data } = await axios.get(
+        `${API}/agents/${agentId}/whatsapp-channels`,
+        { withCredentials: true }
+      );
+      if (data.ok) {
+        setWhatsappChannels(data.channels || []);
+        // Se só tem 1 canal conectado, pré-seleciona automaticamente
+        const connected = (data.channels || []).filter(c => c.connected);
+        if (connected.length === 1 && !mcpCredsForm.canal_id) {
+          setMcpCredsForm(f => ({ ...f, canal_id: connected[0].id }));
+        }
+      } else {
+        setWhatsappChannels([]);
+        alert(data.error || "Não foi possível listar canais. Verifique apiUrl/userToken e salve antes.");
+      }
+    } catch (e) {
+      alert(e.response?.data?.detail || e.message || "Erro ao buscar canais.");
+    } finally {
+      setLoadingChannels(false);
+    }
+  };
+
   // ---- Helpers de workflow (criar/vincular direto do agente) ----
   const persistWorkflowIdOnAgent = async (wfId) => {
     // Salva o vínculo sem acionar validação completa do agente (muitos fluxos ainda sem LLM)
@@ -801,6 +831,46 @@ export default function AgentBuilder() {
             ))}
           </div>
         )}
+        {/* Banner: avisa quando o agente está em modo LLM free-form (sem workflow) */}
+        {!isNew && !workflowId && (
+          <div style={{
+            marginBottom: 10,
+            padding: "12px 14px",
+            background: "rgba(251,191,36,0.08)",
+            border: "1px solid rgba(251,191,36,0.3)",
+            borderRadius: 8,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+          }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#FBBF24", marginBottom: 2 }}>
+                ⚠ Modo LLM livre — respostas imprevisíveis
+              </div>
+              <div style={{ fontSize: 11, color: "#FDE68A", lineHeight: 1.4 }}>
+                Este agente decide sozinho quando chamar tools. Para comportamento determinístico
+                (classificar intenção → executar ação → responder), ative o modo Workflow com o
+                template de atendimento pronto.
+              </div>
+            </div>
+            <button
+              onClick={() => createFromTemplateAndOpen("atendimento_whatsapp")}
+              disabled={creatingWorkflow}
+              style={{
+                padding: "8px 14px",
+                background: "linear-gradient(135deg, #F97316, #EA580C)",
+                border: "none", borderRadius: 6,
+                color: "white", fontSize: 11, fontWeight: 700,
+                cursor: creatingWorkflow ? "wait" : "pointer",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {creatingWorkflow ? "Criando..." : "Ativar modo Workflow"}
+            </button>
+          </div>
+        )}
+
         {/* Workflow — surface única dentro do agente */}
         {!isNew && (
           workflowId ? (
@@ -1196,6 +1266,7 @@ export default function AgentBuilder() {
                       { key: "apiUrl", label: "API URL", placeholder: "https://seu-crm.clickmassa.com.br", type: "text" },
                       { key: "userToken", label: "User Token", placeholder: mcpCredsInfo?.configured ? "••••••• (deixe em branco para manter)" : "token_aqui", type: "password" },
                       { key: "wabaId", label: "WABA ID (opcional)", placeholder: "id do número WhatsApp", type: "text" },
+                      { key: "canal_id", label: "Canal ID (obrigatório p/ envio)", placeholder: "id numérico do canal WhatsApp", type: "text" },
                     ].map(({ key, label, placeholder, type }) => (
                       <div key={key} style={{ marginBottom: 6 }}>
                         <label style={{ display: "block", fontSize: 9, color: "#A3A3A3", marginBottom: 2, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</label>
@@ -1210,6 +1281,51 @@ export default function AgentBuilder() {
                         />
                       </div>
                     ))}
+                    {/* Auto-descobrir canal_id chamando /whatsapp/list */}
+                    <div style={{ marginTop: 8, padding: "8px 10px", background: "rgba(249,115,22,0.06)", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 6 }}>
+                      <div style={{ fontSize: 10, color: "#FB923C", fontWeight: 600, marginBottom: 6 }}>
+                        Não sabe o Canal ID?
+                      </div>
+                      <button
+                        onClick={fetchWhatsappChannels}
+                        disabled={loadingChannels}
+                        style={{ width: "100%", padding: "6px", background: "rgba(249,115,22,0.15)", border: "1px solid rgba(249,115,22,0.35)", borderRadius: 4, color: "#FDBA74", fontSize: 10, cursor: loadingChannels ? "wait" : "pointer", fontWeight: 600 }}
+                      >
+                        {loadingChannels ? "Buscando canais..." : "Descobrir canais da ClickMassa"}
+                      </button>
+                      {whatsappChannels && whatsappChannels.length === 0 && (
+                        <div style={{ fontSize: 9, color: "#FCA5A5", marginTop: 6, lineHeight: 1.4 }}>
+                          Nenhum canal retornado. Verifique se já salvou apiUrl + userToken e se o endpoint /whatsapp/list existe nessa instância.
+                        </div>
+                      )}
+                      {whatsappChannels && whatsappChannels.length > 0 && (
+                        <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+                          {whatsappChannels.map(ch => (
+                            <button
+                              key={ch.id}
+                              onClick={() => setMcpCredsForm(f => ({ ...f, canal_id: ch.id }))}
+                              style={{
+                                display: "flex", alignItems: "center", justifyContent: "space-between",
+                                padding: "6px 8px",
+                                background: mcpCredsForm.canal_id === ch.id ? "rgba(16,185,129,0.15)" : "rgba(255,255,255,0.02)",
+                                border: `1px solid ${mcpCredsForm.canal_id === ch.id ? "rgba(16,185,129,0.4)" : "rgba(255,255,255,0.08)"}`,
+                                borderRadius: 4, cursor: "pointer", textAlign: "left",
+                              }}
+                            >
+                              <div>
+                                <div style={{ fontSize: 11, color: "white", fontWeight: 600 }}>
+                                  {ch.name} <span style={{ color: "#737373", fontWeight: 400 }}>(id: {ch.id})</span>
+                                </div>
+                                <div style={{ fontSize: 9, color: "#A3A3A3" }}>
+                                  {ch.number || "sem número"} · {ch.status}
+                                </div>
+                              </div>
+                              <div style={{ width: 8, height: 8, borderRadius: "50%", background: ch.connected ? "#10B981" : "#6B7280", flexShrink: 0 }} />
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                     <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
                       <button
                         onClick={async () => {
@@ -1237,7 +1353,7 @@ export default function AgentBuilder() {
                           try {
                             await axios.delete(`${API}/agents/${agent.agent_id}/mcp-credentials`, { withCredentials: true });
                             setMcpCredsInfo({ configured: false });
-                            setMcpCredsForm({ apiUrl: "", userToken: "", wabaId: "" });
+                            setMcpCredsForm({ apiUrl: "", userToken: "", wabaId: "", canal_id: "" });
                             setShowMcpCredsForm(false);
                           } catch (e) { alert(e.response?.data?.detail || "Erro ao remover"); }
                         }}
