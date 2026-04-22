@@ -1246,6 +1246,10 @@ async def run_agent(request: Request, agent_id: str, body: AgentRunRequest):
     agent_mcp_creds = await _get_agent_mcp_credentials(db, agent_id)
     if agent_mcp_creds:
         agent_mcp_creds["workspace_id"] = user["workspace_id"]
+        ws_cm = workspace_creds.get("clickmassa", {})
+        for _k in ("canal_id", "wabaId", "base_url", "token"):
+            if not agent_mcp_creds.get(_k) and ws_cm.get(_k):
+                agent_mcp_creds[_k] = ws_cm[_k]
         workspace_creds["clickmassa"] = agent_mcp_creds
 
     # Resolve session_id — usa o fornecido ou gera um novo por agente+usuário
@@ -1334,6 +1338,10 @@ async def run_agent_stream(request: Request, agent_id: str, body: AgentRunReques
     agent_mcp_creds = await _get_agent_mcp_credentials(db, agent_id)
     if agent_mcp_creds:
         agent_mcp_creds["workspace_id"] = user["workspace_id"]
+        ws_cm = workspace_creds.get("clickmassa", {})
+        for _k in ("canal_id", "wabaId", "base_url", "token"):
+            if not agent_mcp_creds.get(_k) and ws_cm.get(_k):
+                agent_mcp_creds[_k] = ws_cm[_k]
         workspace_creds["clickmassa"] = agent_mcp_creds
 
     session_id = body.session_id or f"{agent_id}_{user['user_id']}"
@@ -2344,6 +2352,12 @@ async def webhook_trigger(
         agent_mcp_creds = await _get_agent_mcp_credentials(db, agent_id)
         if agent_mcp_creds:
             agent_mcp_creds["workspace_id"] = workspace_id
+            # Herança de campos críticos: se o agente não tem canal_id/wabaId configurado,
+            # usa o valor do workspace-level (em vez de sobrescrever com string vazia).
+            ws_clickmassa = workspace_creds.get("clickmassa", {})
+            for _inherit_key in ("canal_id", "wabaId", "base_url", "token"):
+                if not agent_mcp_creds.get(_inherit_key) and ws_clickmassa.get(_inherit_key):
+                    agent_mcp_creds[_inherit_key] = ws_clickmassa[_inherit_key]
             workspace_creds["clickmassa"] = agent_mcp_creds
     except Exception as e:
         logger.warning(f"Webhook: erro ao carregar MCP credentials do agente {agent_id}: {e}")
@@ -2795,6 +2809,10 @@ async def process_pending_leads(
     agent_mcp_creds = await _get_agent_mcp_credentials(db, agent_id)
     if agent_mcp_creds:
         agent_mcp_creds["workspace_id"] = workspace_id
+        ws_cm = workspace_creds.get("clickmassa", {})
+        for _k in ("canal_id", "wabaId", "base_url", "token"):
+            if not agent_mcp_creds.get(_k) and ws_cm.get(_k):
+                agent_mcp_creds[_k] = ws_cm[_k]
         workspace_creds["clickmassa"] = agent_mcp_creds
 
     # Dispara processamento em background (não bloqueia a resposta HTTP)
